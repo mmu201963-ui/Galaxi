@@ -1,16 +1,8 @@
 {
-  "name": "galaxi-ai-super-trader",
-  "version": "21.0.2",
+  "name": "galaxi-v22-operativo",
+  "version": "22.0.0",
   "private": true,
   "type": "module",
-  "scripts": {
-    "start": "node server.js",
-    "check": "node --check server.js && node --check index.js"
-  },
-  "engines": {
-    "node": ">=20"
-  },
-  "dependencies": {
-    "ws": "^8.18.3"
-  }
+  "scripts": {"start":"node server.js","check":"node --check index.js && node --check server.js"},
+  "dependencies": {"cors":"^2.8.5","express":"^5.1.0","ws":"^8.18.0"}
 }

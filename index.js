@@ -1,419 +1,302 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import WebSocket from 'ws';
 
-const ROOT = new URL('.', import.meta.url).pathname;
-const runtimeFile = `${ROOT}galaxi-runtime.json`;
-const controlFile = `${ROOT}galaxi-control.json`;
+const runtimeFile = 'galaxi-runtime.json';
+const controlFile = 'galaxi-control.json';
+
+const num = (v, d) => Number.isFinite(Number(v)) ? Number(v) : d;
+const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const now = () => Date.now();
+const round = (n, d = 6) => Number(Number(n).toFixed(d));
 
 const cfg = {
-  mode: String(process.env.TRADING_MODE || 'PAPER').toUpperCase(),
-  capital: Number(process.env.PAPER_START_CAPITAL || 10000),
-  maxPositions: Math.min(12, Math.max(1, Number(process.env.MAX_POSITIONS || 12))),
-  maxTotalMarginPct: Math.min(80, Math.max(1, Number(process.env.MAX_TOTAL_MARGIN_PCT || 30))),
-  maxPositionMarginPct: Math.min(10, Math.max(0.25, Number(process.env.MAX_POSITION_MARGIN_PCT || 3))),
-  interval: Math.max(5000, Number(process.env.SCAN_INTERVAL_MS || 20000)),
-  dataRefreshMs: Math.max(30000, Number(process.env.CANDLE_REFRESH_MS || 60000)),
-  candleSymbols: Math.min(50, Math.max(10, Number(process.env.CANDLE_SYMBOLS || 30))),
-  maxQuoteVolume: Number(process.env.MIN_QUOTE_VOLUME || 0),
-  takeProfitPct: Number(process.env.TAKE_PROFIT_PCT || 1.2),
-  stopLossPct: Number(process.env.STOP_LOSS_PCT || 0.7),
-  maxHoldMs: Number(process.env.MAX_HOLD_MS || 1800000),
-  cooldownMs: Number(process.env.COOLDOWN_MS || 600000),
-  feePct: Number(process.env.PAPER_FEE_PCT || 0.04),
-  leverage: Math.min(20, Math.max(1, Number(process.env.PAPER_LEVERAGE || 5))),
-  apiBase: process.env.BINANCE_FUTURES_REST || 'https://fapi.binance.com',
+  mode: String(process.env.TRADING_MODE || 'PAPER').toUpperCase() === 'LIVE' ? 'LIVE' : 'PAPER',
+  liveArmed: String(process.env.LIVE_ARMED || 'false').toLowerCase() === 'true',
+  openaiKey: process.env.OPENAI_API_KEY || '',
+  openaiModel: process.env.OPENAI_MODEL || 'gpt-5.5',
+  binanceKey: process.env.BINANCE_API_KEY || '',
+  binanceSecret: process.env.BINANCE_API_SECRET || '',
+  binanceBase: (process.env.BINANCE_FAPI_BASE || 'https://fapi.binance.com').replace(/\/$/, ''),
   wsUrl: process.env.BINANCE_FUTURES_WS || 'wss://fstream.binance.com/ws/!miniTicker@arr',
-  tickerPollMs: Math.max(5000, Number(process.env.TICKER_POLL_MS || 5000)),
-  maxTickerSymbols: Math.min(500, Math.max(50, Number(process.env.MAX_TICKER_SYMBOLS || 250)))
+  capital: Math.max(100, num(process.env.PAPER_START_CAPITAL, 10000)),
+  maxPositions: clamp(Math.floor(num(process.env.MAX_POSITIONS, 12)), 1, 12),
+  maxTotalMarginPct: clamp(num(process.env.MAX_TOTAL_MARGIN_PCT, 30), 1, 50),
+  maxPositionMarginPct: clamp(num(process.env.MAX_POSITION_MARGIN_PCT, 2), 0.25, 5),
+  leverage: clamp(Math.floor(num(process.env.LEVERAGE, 5)), 1, 10),
+  scanMs: Math.max(15000, Math.floor(num(process.env.SCAN_INTERVAL_MS, 20000))),
+  aiTimeoutMs: Math.max(5000, Math.floor(num(process.env.AI_TIMEOUT_MS, 15000))),
+  aiTopSymbols: clamp(Math.floor(num(process.env.AI_TOP_SYMBOLS, 20)), 8, 30),
+  klineLimit: clamp(Math.floor(num(process.env.KLINE_LIMIT, 80)), 60, 150),
+  maxDailyLossPct: clamp(num(process.env.MAX_DAILY_LOSS_PCT, 5), 0.5, 20),
+  maxDrawdownPct: clamp(num(process.env.MAX_DRAWDOWN_PCT, 10), 1, 30),
+  minSecondsBetweenOrders: Math.max(2, num(process.env.MIN_SECONDS_BETWEEN_ORDERS, 5)),
+  maxActionsPerCycle: clamp(Math.floor(num(process.env.MAX_ACTIONS_PER_CYCLE, 2)), 1, 4),
+  paperTpPct: Math.max(0.1, num(process.env.PAPER_TP_PCT, 1.2)),
+  paperSlPct: Math.max(0.1, num(process.env.PAPER_SL_PCT, 0.7)),
+  paperMaxHoldMs: Math.max(60000, num(process.env.PAPER_MAX_HOLD_MS, 1800000)),
 };
 
 const state = {
-  running: true, stopped: false, mode: cfg.mode, equity: cfg.capital, initialCapital: cfg.capital,
+  running: true, mode: cfg.mode, ai: Boolean(cfg.openaiKey), aiModel: cfg.openaiModel,
+  liveArmed: cfg.liveArmed, equity: cfg.capital, initialCapital: cfg.capital,
   realizedPnl: 0, unrealizedPnl: 0, todayPnl: 0, drawdownPct: 0, dailyLossPct: 0,
   symbols: 0, warmSymbols: 0, cycle: 0, wsConnected: 0, wsExpected: 1,
   candidates: 0, riskApproved: 0, portfolioCount: 0, regime: 'MIXTO',
-  timeframes: { '20s': '—', '1m': '—', '3m': '—', '5m': '—' },
-  longPct: 50, shortPct: 50, positions: [], ranking: [], history: [], news: [],
-  lastSignal: 'Calentando mercado…', lastError: null, restCalls: 0, rate429: 0, rate418: 0,
-  dataQuality: 'TICKS', lastUpdate: null, decisionNote: 'Esperando datos suficientes.'
+  timeframes: {'20s':'—','1m':'—','3m':'—','5m':'—'}, longPct: 50, shortPct: 50,
+  positions: [], ranking: [], history: [], news: [], lastSignal: 'Esperando datos para el cerebro IA…',
+  lastError: null, aiDecision: null, aiReasoning: '', aiCalls: 0, aiErrors: 0,
+  restCalls: 0, rate429: 0, rate418: 0, lastUpdate: null, peakEquity: cfg.capital,
+  stopped: false, lastCycleMs: 0
 };
 
 const ticks = new Map();
-const tickSeries = new Map();
-const candles = new Map();
 const cooldown = new Map();
-let ws = null, stopped = false, reconnectTimer = null, lastCandleRefresh = 0, loopTimer = null, tickerTimer = null, wsLastMessage = 0;
+const marketInfo = new Map();
+let ws = null, reconnectTimer = null, loopBusy = false, lastOrderTs = 0, serverOffset = 0;
+let lastAccount = null, stopRequested = false, intervalHandle = null;
 
-const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
-const pctMove = (now, then) => then > 0 ? (now / then - 1) * 100 : 0;
-const avg = (a, fn = x => x) => a.length ? a.reduce((s, x) => s + fn(x), 0) / a.length : 0;
-const std = a => { if (a.length < 2) return 0; const m = avg(a); return Math.sqrt(avg(a, x => (x - m) ** 2)); };
-const safe = n => Number.isFinite(n) ? n : 0;
-
-function ema(values, period) {
-  if (!values.length) return 0;
-  const k = 2 / (period + 1);
-  let e = values[0];
-  for (let i = 1; i < values.length; i++) e = values[i] * k + e * (1 - k);
-  return e;
-}
-function rsi(values, period = 14) {
-  if (values.length < period + 1) return 50;
-  let gain = 0, loss = 0;
-  for (let i = values.length - period; i < values.length; i++) {
-    const d = values[i] - values[i - 1];
-    if (d >= 0) gain += d; else loss -= d;
-  }
-  if (loss === 0) return 100;
-  return 100 - (100 / (1 + gain / loss));
-}
-function atr(cs, period = 14) {
-  if (cs.length < period + 1) return 0;
-  const trs = [];
-  for (let i = 1; i < cs.length; i++) {
-    const c = cs[i], p = cs[i - 1];
-    trs.push(Math.max(c.high - c.low, Math.abs(c.high - p.close), Math.abs(c.low - p.close)));
-  }
-  return avg(trs.slice(-period));
-}
-function bollinger(values, period = 20) {
-  const v = values.slice(-period); if (v.length < period) return { mid: avg(v), upper: 0, lower: 0, width: 0 };
-  const mid = avg(v), s = std(v);
-  return { mid, upper: mid + 2 * s, lower: mid - 2 * s, width: mid ? (4 * s / mid) * 100 : 0 };
-}
-function normalizeKlines(raw) {
-  return raw.map(k => ({
-    ts: Number(k[0]), open: Number(k[1]), high: Number(k[2]), low: Number(k[3]), close: Number(k[4]),
-    volume: Number(k[5]), closeTs: Number(k[6]), quoteVolume: Number(k[7]), trades: Number(k[8]),
-    takerBuyBase: Number(k[9]), takerBuyQuote: Number(k[10])
-  })).filter(x => x.close > 0);
-}
-function sampleAt(a, msAgo) {
-  const target = Date.now() - msAgo;
-  for (let i = a.length - 1; i >= 0; i--) if (a[i].ts <= target) return a[i].price;
-  return a[0]?.price || 0;
-}
-function pushTick(symbol, item) {
-  let a = tickSeries.get(symbol); if (!a) { a = []; tickSeries.set(symbol, a); }
-  a.push(item);
-  const cutoff = Date.now() - 12 * 60 * 1000;
-  while (a.length && a[0].ts < cutoff) a.shift();
-}
-function tickFeatures(symbol) {
-  const a = tickSeries.get(symbol) || [];
-  if (a.length < 12) return null;
-  const now = a[a.length - 1].price;
-  const p20 = sampleAt(a, 20000), p60 = sampleAt(a, 60000), p180 = sampleAt(a, 180000), p300 = sampleAt(a, 300000);
-  const m20 = pctMove(now, p20), m60 = pctMove(now, p60), m180 = pctMove(now, p180), m300 = pctMove(now, p300);
-  const recent = avg(a.slice(-8), x => x.price), prior = avg(a.slice(-24, -8).map(x => x.price)) || recent;
-  const micro = pctMove(recent, prior);
-  const returns = [];
-  for (let i = Math.max(1, a.length - 80); i < a.length; i++) returns.push(pctMove(a[i].price, a[i - 1].price));
-  return { m20, m60, m180, m300, micro, vol: std(returns), price: now };
-}
-function candleFeatures(symbol) {
-  const byTf = candles.get(symbol);
-  if (!byTf) return null;
-  const out = {};
-  for (const tf of ['1m', '5m', '15m']) {
-    const cs = byTf[tf] || [];
-    if (cs.length < 25) continue;
-    const closes = cs.map(x => x.close);
-    const e9 = ema(closes, 9), e21 = ema(closes, 21), e55 = ema(closes, 55);
-    const last = cs.at(-1), a = atr(cs), bb = bollinger(closes), rv = rsi(closes);
-    const recentHigh = Math.max(...cs.slice(-20).map(x => x.high));
-    const recentLow = Math.min(...cs.slice(-20).map(x => x.low));
-    const volNow = avg(cs.slice(-3), x => x.quoteVolume);
-    const volBase = avg(cs.slice(-20, -3), x => x.quoteVolume) || volNow;
-    const buyRatio = last.quoteVolume > 0 ? last.takerBuyQuote / last.quoteVolume : 0.5;
-    out[tf] = {
-      close: last.close, ema9: e9, ema21: e21, ema55: e55, rsi: rv, atr: a,
-      atrPct: last.close ? a / last.close * 100 : 0, bbWidth: bb.width,
-      breakoutUp: last.close > recentHigh * 0.999, breakoutDown: last.close < recentLow * 1.001,
-      volumeRatio: volBase ? volNow / volBase : 1, buyRatio,
-      bodyPct: last.open ? (last.close / last.open - 1) * 100 : 0
-    };
-  }
-  return out;
-}
-function scoreOpportunity(symbol, tick, cf, market) {
-  const t = tickFeatures(symbol); if (!t) return null;
-  const f1 = cf?.['1m'], f5 = cf?.['5m'], f15 = cf?.['15m'];
-  const technical = [];
-  const add = (v, w) => technical.push([safe(v), w]);
-  add(t.m20, 0.15); add(t.m60, 0.15); add(t.m180, 0.10); add(t.m300, 0.08); add(t.micro, 0.05);
-  if (f1) { add((f1.ema9 / f1.ema21 - 1) * 100, 0.10); add((f1.ema21 / f1.ema55 - 1) * 100, 0.06); add((f1.rsi - 50) / 8, 0.05); add((f1.buyRatio - 0.5) * 10, 0.04); add((f1.volumeRatio - 1) * 0.8, 0.03); }
-  if (f5) { add((f5.ema9 / f5.ema21 - 1) * 100, 0.08); add((f5.ema21 / f5.ema55 - 1) * 100, 0.06); add((f5.rsi - 50) / 10, 0.03); }
-  if (f15) { add((f15.ema21 / f15.ema55 - 1) * 100, 0.06); add((f15.rsi - 50) / 12, 0.02); }
-  let direction = technical.reduce((s, [v, w]) => s + v * w, 0);
-  const marketBias = market.bias;
-  direction += marketBias * 0.12;
-
-  // Adaptive conviction: no fixed "score > X" entry gate. The engine ranks all usable markets.
-  const side = direction >= 0 ? 'LONG' : 'SHORT';
-  const abs = Math.abs(direction);
-  const agreement = [t.m20, t.m60, t.m180, f1 ? f1.ema9 - f1.ema21 : 0, f5 ? f5.ema9 - f5.ema21 : 0]
-    .map(v => Math.sign(v)).filter(v => v !== 0);
-  const agreePct = agreement.length ? Math.abs(avg(agreement.map(v => v === Math.sign(direction) ? 1 : 0))) : 0;
-  const volatility = f1?.atrPct || t.vol || 0;
-  const volumeBoost = clamp(((f1?.volumeRatio || 1) - 1) * 12, -8, 10);
-  const breakout = side === 'LONG' ? (f1?.breakoutUp ? 7 : 0) : (f1?.breakoutDown ? 7 : 0);
-  const extension = f1 ? Math.abs((f1.close / f1.ema21 - 1) * 100) : Math.abs(t.m60);
-  const overextended = extension > Math.max(0.9, volatility * 2.5) ? -8 : 0;
-  const score = clamp(Math.round(50 + abs * 22 + agreePct * 16 + volumeBoost + breakout + overextended), 1, 99);
-  const confidence = clamp(Math.round(50 + abs * 30 + agreePct * 15 + (f1 ? 5 : 0) + volumeBoost / 2), 1, 97);
-  const expectedMove = clamp(Math.max(0.25, volatility * 1.8 + abs * 0.7), 0.25, 3.5);
-  const rr = expectedMove / Math.max(0.2, cfg.stopLossPct);
-  const regime = marketBias > 0.2 ? 'ALCISTA' : marketBias < -0.2 ? 'BAJISTA' : 'MIXTO';
-  const strategy = breakout ? 'BREAKOUT_CONFIRMADO' : abs > 0.45 ? 'MOMENTUM_MULTI_TF' : agreePct > 0.65 ? 'CONTINUACION_ESTRUCTURAL' : 'REVERSIÓN_CONTEXTUAL';
-  return {
-    symbol, side, score, confidence, strategy, price: tick.price,
-    momentum20s: Number(t.m20.toFixed(3)), momentum1m: Number(t.m60.toFixed(3)), momentum3m: Number(t.m180.toFixed(3)), momentum5m: Number(t.m300.toFixed(3)),
-    volatility: Number(volatility.toFixed(4)), volumeRatio: Number((f1?.volumeRatio || 1).toFixed(2)), rsi1m: Number((f1?.rsi || 50).toFixed(1)),
-    agreement: Number((agreePct * 100).toFixed(0)), expectedMove: Number(expectedMove.toFixed(2)), rr: Number(rr.toFixed(2)), regime,
-    thesis: `${strategy} · ${side} · multi-TF ${agreePct * 100 | 0}% · vol ${volatility.toFixed(2)}% · RR ${rr.toFixed(2)}`,
-    decision: abs < 0.03 ? 'HOLD' : side,
-    evidence: { t, f1, f5, f15 }
-  };
-}
-function marketContext(allTicks) {
-  const arr = [];
-  for (const [s] of allTicks) { const f = tickFeatures(s); if (f) arr.push(f); }
-  if (!arr.length) return { bias: 0, regime: 'MIXTO' };
-  const bias = clamp(avg(arr, x => clamp(x.m60 * 0.4 + x.m180 * 0.35 + x.m300 * 0.25, -2, 2)) / 1.2, -1, 1);
-  return { bias, regime: bias > 0.2 ? 'ALCISTA' : bias < -0.2 ? 'BAJISTA' : 'MIXTO' };
-}
-function analyze() {
-  const market = marketContext(ticks);
-  const arr = [];
-  for (const [symbol, tick] of ticks) {
-    if (!tick.price || (cfg.maxQuoteVolume > 0 && tick.volume < cfg.maxQuoteVolume)) continue;
-    const o = scoreOpportunity(symbol, tick, candleFeatures(symbol), market);
-    if (o) arr.push(o);
-  }
-  arr.sort((a, b) => b.score - a.score || b.confidence - a.confidence || b.expectedMove - a.expectedMove);
-  return { arr, market };
-}
-function updateRegime(all, market) {
-  if (!all.length) { state.regime = 'MIXTO'; state.longPct = 50; state.shortPct = 50; return; }
-  const longs = all.filter(x => x.side === 'LONG').length;
-  state.longPct = Math.round(longs / all.length * 100); state.shortPct = 100 - state.longPct;
-  state.regime = market.regime;
-  const f = all.slice(0, 80);
-  state.timeframes = {
-    '20s': avg(f, x => x.momentum20s) > 0.02 ? '↑' : avg(f, x => x.momentum20s) < -0.02 ? '↓' : '↔',
-    '1m': avg(f, x => x.momentum1m) > 0.03 ? '↑' : avg(f, x => x.momentum1m) < -0.03 ? '↓' : '↔',
-    '3m': avg(f, x => x.momentum3m) > 0.05 ? '↑' : avg(f, x => x.momentum3m) < -0.05 ? '↓' : '↔',
-    '5m': avg(f, x => x.momentum5m) > 0.07 ? '↑' : avg(f, x => x.momentum5m) < -0.07 ? '↓' : '↔'
-  };
-}
-function marginFor() {
-  const byPosition = cfg.capital * cfg.maxPositionMarginPct / 100;
-  const total = cfg.capital * cfg.maxTotalMarginPct / 100;
-  const used = state.positions.reduce((s, p) => s + p.margin, 0);
-  return Math.max(0, Math.min(byPosition, total - used));
-}
-function diversityPenalty(candidate, open) {
-  const sameSide = open.filter(p => p.side === candidate.side).length;
-  const sameStrategy = open.filter(p => p.strategy === candidate.strategy).length;
-  const base = Math.min(18, sameSide * 3 + sameStrategy * 2);
-  return base;
-}
-function chooseEntries(all) {
-  const held = new Set(state.positions.map(p => p.symbol));
-  const now = Date.now();
-  const available = all.filter(x => !held.has(x.symbol) && (cooldown.get(x.symbol) || 0) < now);
-  if (!available.length) return [];
-  const selected = [];
-  // Rank globally, but deliberately penalize concentration and reward independent evidence.
-  for (const c of available) {
-    const adjusted = c.score - diversityPenalty(c, [...state.positions, ...selected]);
-    c.selectionScore = Math.round(adjusted);
-  }
-  available.sort((a, b) => b.selectionScore - a.selectionScore || b.confidence - a.confidence);
-  const maxNew = Math.min(2, cfg.maxPositions - state.positions.length);
-  const wantBalanced = state.regime === 'MIXTO';
-  for (const c of available) {
-    if (selected.length >= maxNew) break;
-    if (wantBalanced && selected.length === 1 && selected[0].side === c.side) {
-      const opposite = available.find(x => x.side !== c.side && !selected.includes(x));
-      if (opposite && opposite.selectionScore >= c.selectionScore - 10) { selected.push(opposite); continue; }
-    }
-    // Confidence is advisory; there is no universal score gate. Risk sizing remains separate.
-    if (c.confidence < 45) continue;
-    selected.push(c);
-  }
-  return selected;
-}
-function openPaper(all) {
-  if (stopped || state.positions.length >= cfg.maxPositions) return;
-  const selected = chooseEntries(all);
-  const now = Date.now();
-  for (const a of selected) {
-    const margin = marginFor(); if (margin <= 0) break;
-    const notional = margin * cfg.leverage;
-    const qty = notional / a.price;
-    state.positions.push({
-      id: `G${now}_${Math.random().toString(36).slice(2,8)}`, symbol: a.symbol, side: a.side,
-      entry: a.price, current: a.price, margin, notional, qty, pnl: 0, score: a.score, confidence: a.confidence,
-      strategy: a.strategy, openedAt: new Date().toISOString(), openedTs: now,
-      thesis: a.thesis, peakPnlPct: 0, minPnlPct: 0
-    });
-    cooldown.set(a.symbol, now + cfg.cooldownMs);
-    state.lastSignal = `PAPER OPEN ${a.symbol} ${a.side} · ${a.strategy} · ${a.score}/100`;
-    state.history.unshift({ time: new Date().toISOString(), action: 'OPEN', symbol: a.symbol, side: a.side, score: a.score, reason: a.thesis });
-  }
-}
-function closePosition(p, reason) {
-  const fee = Math.abs(p.notional) * (cfg.feePct / 100) * 2;
-  const net = p.pnl - fee;
-  state.realizedPnl += net;
-  state.history.unshift({ time: new Date().toISOString(), action: 'CLOSE', symbol: p.symbol, side: p.side, pnl: Number(net.toFixed(4)), reason });
-  cooldown.set(p.symbol, Date.now() + cfg.cooldownMs);
-  state.lastSignal = `PAPER CLOSE ${p.symbol} ${p.side} · ${reason} · ${net.toFixed(2)}`;
-}
-function markAndClose(all) {
-  const bySymbol = new Map(all.map(x => [x.symbol, x]));
-  const now = Date.now(), keep = [];
-  for (const p of state.positions) {
-    const t = ticks.get(p.symbol); if (!t) { keep.push(p); continue; }
-    p.current = t.price;
-    const movePct = p.side === 'LONG' ? (p.current / p.entry - 1) * 100 : (p.entry / p.current - 1) * 100;
-    p.pnl = p.notional * (movePct / 100);
-    p.unrealizedPct = p.margin ? p.pnl / p.margin * 100 : 0;
-    p.peakPnlPct = Math.max(p.peakPnlPct || 0, p.unrealizedPct);
-    p.minPnlPct = Math.min(p.minPnlPct || 0, p.unrealizedPct);
-    const a = bySymbol.get(p.symbol);
-    const age = now - p.openedTs;
-    const tp = p.unrealizedPct >= cfg.takeProfitPct;
-    const sl = p.unrealizedPct <= -cfg.stopLossPct;
-    const timeout = age >= cfg.maxHoldMs;
-    const thesisFlip = a && a.side !== p.side && a.confidence >= 55 && a.score >= 55;
-    const deterioration = a && a.side === p.side && a.confidence < 40 && p.unrealizedPct < 0;
-    const trailing = p.peakPnlPct >= cfg.takeProfitPct * 0.65 && p.unrealizedPct < p.peakPnlPct - Math.max(0.25, cfg.takeProfitPct * 0.35);
-    if (tp || sl || timeout || thesisFlip || deterioration || trailing) {
-      closePosition(p, tp ? 'TP' : sl ? 'SL' : timeout ? 'TIME' : thesisFlip ? 'THESIS_FLIP' : trailing ? 'TRAIL' : 'DETERIORATION');
-    } else keep.push(p);
-  }
-  state.positions = keep.slice(0, cfg.maxPositions);
-}
-function write() {
+function writeState() {
+  const day = new Date().toISOString().slice(0,10);
+  if (state.dayKey !== day) { state.dayKey = day; state.dayStartEquity = num(state.equity, cfg.capital); state.todayPnl = 0; }
   state.portfolioCount = state.positions.length;
-  state.unrealizedPnl = state.positions.reduce((s, p) => s + Number(p.pnl || 0), 0);
-  state.equity = cfg.capital + state.realizedPnl + state.unrealizedPnl;
-  const dd = Math.max(0, cfg.capital - state.equity);
-  state.drawdownPct = cfg.capital ? dd / cfg.capital * 100 : 0;
-  state.dailyLossPct = Math.min(0, state.realizedPnl / cfg.capital * 100);
-  state.stopped = stopped; state.running = !stopped; state.lastUpdate = new Date().toISOString();
+  state.unrealizedPnl = state.positions.reduce((s,p) => s + num(p.pnl,0), 0);
+  if (cfg.mode === 'PAPER') state.equity = cfg.capital + state.realizedPnl + state.unrealizedPnl;
+  state.peakEquity = Math.max(num(state.peakEquity,cfg.capital), num(state.equity,cfg.capital));
+  state.drawdownPct = state.peakEquity > 0 ? Math.max(0,(state.peakEquity-state.equity)/state.peakEquity*100) : 0;
+  state.dailyLossPct = state.dayStartEquity > 0 ? Math.min(0, state.todayPnl/state.dayStartEquity*100) : 0;
+  state.lastUpdate = new Date().toISOString();
   fs.writeFileSync(runtimeFile, JSON.stringify(state, null, 2));
 }
-async function getKlines(symbol, interval, limit = 100) {
-  const u = new URL('/fapi/v1/klines', cfg.apiBase);
-  u.searchParams.set('symbol', symbol); u.searchParams.set('interval', interval); u.searchParams.set('limit', String(limit));
+function pushHistory(item) {
+  state.history.unshift({time:new Date().toISOString(), ...item});
+  state.history = state.history.slice(0,100);
+}
+
+async function rest(path, options={}, signed=false) {
+  const method = options.method || 'GET';
+  const params = {...(options.params || {})};
+  if (signed) { params.timestamp = Date.now() + serverOffset; params.recvWindow = 5000; }
+  const q = new URLSearchParams();
+  for (const [k,v] of Object.entries(params)) if (v !== undefined && v !== null) q.set(k,String(v));
+  if (signed) q.set('signature', crypto.createHmac('sha256', cfg.binanceSecret).update(q.toString()).digest('hex'));
+  const url = `${cfg.binanceBase}${path}${q.toString() ? `?${q}` : ''}`;
+  const headers = {};
+  if (cfg.binanceKey) headers['X-MBX-APIKEY'] = cfg.binanceKey;
+  if (method !== 'GET') headers['Content-Type'] = 'application/x-www-form-urlencoded';
   state.restCalls++;
-  const r = await fetch(u, { headers: { 'User-Agent': 'GALAXI/20' } });
-  if (r.status === 429) { state.rate429++; throw new Error('Binance REST 429'); }
-  if (r.status === 418) { state.rate418++; throw new Error('Binance REST 418'); }
-  if (!r.ok) throw new Error(`Binance REST ${r.status}`);
-  return normalizeKlines(await r.json());
-}
-async function refreshCandles() {
-  const top = [...ticks.entries()]
-    .filter(([, t]) => t.price > 0)
-    .sort((a, b) => b[1].volume - a[1].volume)
-    .slice(0, cfg.candleSymbols);
-  for (const [symbol] of top) {
-    try {
-      const [m1, m5, m15] = await Promise.all([getKlines(symbol, '1m', 100), getKlines(symbol, '5m', 100), getKlines(symbol, '15m', 100)]);
-      candles.set(symbol, { '1m': m1, '5m': m5, '15m': m15, fetchedAt: Date.now() });
-    } catch (e) { state.lastError = e.message; }
-  }
-  lastCandleRefresh = Date.now();
-  state.dataQuality = `TICKS + KLINES ${Math.min(top.length, cfg.candleSymbols)}`;
-}
-async function refreshTickerRest() {
-  if (stopped) return;
-  try {
-    const u = new URL('/fapi/v1/ticker/24hr', cfg.apiBase);
-    state.restCalls++;
-    const r = await fetch(u, { headers: { 'User-Agent': 'GALAXI/21' } });
-    if (r.status === 429) { state.rate429++; throw new Error('Binance REST 429'); }
-    if (r.status === 418) { state.rate418++; throw new Error('Binance REST 418'); }
-    if (!r.ok) throw new Error(`Binance REST ticker ${r.status}`);
-    const data = await r.json();
-    if (!Array.isArray(data)) throw new Error('Binance REST ticker formato inválido');
-    const now = Date.now();
-    const usable = data
-      .filter(t => String(t.symbol || '').endsWith('USDT') && Number(t.lastPrice) > 0)
-      .sort((a,b) => Number(b.quoteVolume||0) - Number(a.quoteVolume||0))
-      .slice(0, cfg.maxTickerSymbols);
-    for (const t of usable) {
-      const symbol = String(t.symbol);
-      const price = Number(t.lastPrice);
-      const volume = Number(t.quoteVolume || 0);
-      ticks.set(symbol, { price, volume, ts: now });
-      pushTick(symbol, { price, volume, ts: now });
-    }
-    state.dataQuality = state.wsConnected ? `WS + REST ${usable.length}` : `REST ${usable.length}`;
-    if (!state.wsConnected) state.lastError = null;
-  } catch (e) {
-    state.lastError = `REST ticker: ${e.message}`;
-  }
-}
-function startTickerFallback() {
-  clearInterval(tickerTimer);
-  refreshTickerRest();
-  tickerTimer = setInterval(() => {
-    if (!stopped && (!state.wsConnected || Date.now() - wsLastMessage > cfg.tickerPollMs * 2)) refreshTickerRest();
-  }, cfg.tickerPollMs);
+  const res = await fetch(url,{method,headers,body:method==='GET'?undefined:q.toString()});
+  const text = await res.text();
+  if (res.status===429) state.rate429++;
+  if (res.status===418) state.rate418++;
+  let data; try { data=JSON.parse(text); } catch { data={raw:text}; }
+  if (!res.ok) throw new Error(`BINANCE ${res.status}: ${data?.msg || text.slice(0,300)}`);
+  return data;
 }
 
-function connect() {
-  try {
-    ws = new WebSocket(cfg.wsUrl);
-    ws.on('open', () => { state.wsConnected = 1; wsLastMessage = Date.now(); state.lastError = null; console.log('WS_CONNECTED=1'); });
-    ws.on('close', () => {
-      state.wsConnected = 0;
-      if (!stopped && !reconnectTimer) reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, 3000);
-    });
-    ws.on('error', () => { state.lastError = 'WebSocket error'; });
-    ws.on('message', raw => {
-      wsLastMessage = Date.now();
-      try {
-        const arr = JSON.parse(raw.toString()); if (!Array.isArray(arr)) return;
-        const now = Date.now();
-        for (const t of arr) {
-          const symbol = t.s; if (!symbol?.endsWith('USDT')) continue;
-          const price = Number(t.c), volume = Number(t.q || 0);
-          if (price > 0) { ticks.set(symbol, { price, volume, ts: now }); pushTick(symbol, { price, volume, ts: now }); }
-        }
-      } catch { state.lastError = 'WS parse error'; }
-    });
-  } catch (e) { state.lastError = 'WS init: ' + e.message; }
+async function syncServerTime() {
+  const d = await rest('/fapi/v1/time');
+  serverOffset = num(d.serverTime,Date.now()) - Date.now();
 }
-async function loop() {
-  try {
-    if (fs.existsSync(controlFile)) {
-      try { const c = JSON.parse(fs.readFileSync(controlFile, 'utf8')); if (c.stop) stopped = true; } catch {}
-    }
-    if (stopped) { write(); return; }
-    state.cycle++;
-    if (Date.now() - lastCandleRefresh >= cfg.dataRefreshMs && ticks.size) await refreshCandles();
-    const { arr, market } = analyze();
-    state.symbols = ticks.size; state.warmSymbols = arr.length; state.ranking = arr.slice(0, 30);
-    state.candidates = arr.length; state.riskApproved = Math.min(arr.length, cfg.maxPositions * 2);
-    updateRegime(arr, market);
-    markAndClose(arr);
-    if (cfg.mode === 'PAPER') openPaper(arr);
-    state.decisionNote = `Contexto ${market.regime} · ranking dinámico · datos ${state.dataQuality}`;
-    write();
-    if (state.cycle % 5 === 0) console.log(`cycle=${state.cycle} universe=${state.symbols} ranked=${state.ranking.length} portfolio=${state.positions.length} equity=${state.equity.toFixed(2)} regime=${state.regime}`);
-  } catch (e) { state.lastError = e.message; write(); }
-  loopTimer = setTimeout(loop, cfg.interval);
+async function loadExchangeInfo() {
+  const data = await rest('/fapi/v1/exchangeInfo');
+  marketInfo.clear();
+  for (const s of data.symbols || []) {
+    if (s.status!=='TRADING' || s.quoteAsset!=='USDT' || s.contractType!=='PERPETUAL') continue;
+    const lot = (s.filters||[]).find(x=>x.filterType==='LOT_SIZE');
+    const price = (s.filters||[]).find(x=>x.filterType==='PRICE_FILTER');
+    const notional = (s.filters||[]).find(x=>x.filterType==='MIN_NOTIONAL');
+    marketInfo.set(s.symbol,{qtyStep:num(lot?.stepSize,0.001),minQty:num(lot?.minQty,0),tickSize:num(price?.tickSize,0.00001),minNotional:num(notional?.notional,5)});
+  }
+  state.symbols=marketInfo.size;
 }
-
-console.log(`GALAXI | mode=${cfg.mode} | capital=${cfg.capital} | scan=${cfg.interval}ms | candles=${cfg.candleSymbols}`);
-connect();
-startTickerFallback();
-loop();
-process.on('SIGTERM', () => { stopped = true; clearTimeout(loopTimer); clearInterval(tickerTimer); try { ws?.close(); } catch {} write(); process.exit(0); });
+function precisionFromStep(step) {
+  const s=String(step); if(!s.includes('.')) return 0;
+  return Math.max(0,s.split('.')[1].replace(/0+$/,'').length);
+}
+function normalizeQty(symbol, qty) {
+  const m=marketInfo.get(symbol); if(!m) return 0;
+  const step=m.qtyStep, p=precisionFromStep(step);
+  return round(Math.floor(Number(qty)/step)*step,p);
+}
+function normalizePrice(symbol, price) {
+  const m=marketInfo.get(symbol); if(!m) return Number(price);
+  const p=precisionFromStep(m.tickSize);
+  return round(Math.round(Number(price)/m.tickSize)*m.tickSize,p);
+}
+function pctMove(a,b) { return b>0 ? (a/b-1)*100 : 0; }
+function ema(v,p) { if(!v.length) return 0; const k=2/(p+1); let e=v[0]; for(let i=1;i<v.length;i++) e=v[i]*k+e*(1-k); return e; }
+function rsi(v,p=14) {
+  if(v.length<=p) return 50; let g=0,l=0;
+  for(let i=1;i<=p;i++){const d=v[i]-v[i-1]; if(d>=0)g+=d;else l-=d;}
+  let ag=g/p, al=l/p;
+  for(let i=p+1;i<v.length;i++){const d=v[i]-v[i-1];ag=((ag*(p-1))+Math.max(d,0))/p;al=((al*(p-1))+Math.max(-d,0))/p;}
+  if(al===0)return 100; return 100-100/(1+ag/al);
+}
+function atr(k,p=14) { if(k.length<p+2)return 0; const tr=[]; for(let i=1;i<k.length;i++){const h=num(k[i][2],0),l=num(k[i][3],0),pc=num(k[i-1][4],0);tr.push(Math.max(h-l,Math.abs(h-pc),Math.abs(l-pc)));} const r=tr.slice(-p); return r.reduce((a,b)=>a+b,0)/r.length; }
+async function fetchKlines(symbol,interval,limit=cfg.klineLimit) { return rest('/fapi/v1/klines',{params:{symbol,interval,limit}}); }
+function analyzeKlines(symbol,k1,k5) {
+  const c=k1.map(x=>num(x[4],0)), h=k1.map(x=>num(x[2],0)), l=k1.map(x=>num(x[3],0)), v=k1.map(x=>num(x[5],0));
+  const price=c.at(-1)||num(ticks.get(symbol)?.price,0);
+  const e9=ema(c.slice(-40),9),e21=ema(c.slice(-60),21),e50=ema(c.slice(-70),50), rr=rsi(c), aa=atr(k1);
+  const volNow=v.slice(-10).reduce((a,b)=>a+b,0)/10, volPrev=v.slice(-30,-10).reduce((a,b)=>a+b,0)/20||volNow;
+  const c5=k5.map(x=>num(x[4],0));
+  const recentHigh=Math.max(...h.slice(-20)),recentLow=Math.min(...l.slice(-20));
+  const bull=e9>e21&&e21>e50&&pctMove(price,c.at(-6))>0&&pctMove(price,c.at(-16))>0&&ema(c5.slice(-40),20)>=ema(c5.slice(-70),50);
+  const bear=e9<e21&&e21<e50&&pctMove(price,c.at(-6))<0&&pctMove(price,c.at(-16))<0&&ema(c5.slice(-40),20)<=ema(c5.slice(-70),50);
+  return {symbol,price,bias:bull?'LONG':bear?'SHORT':'NEUTRAL',rsi:round(rr,2),atrPct:price?round(aa/price*100,4):0,
+    volumeRatio:round(volPrev?volNow/volPrev:1,2),momentum1m:round(pctMove(price,c.at(-2)),3),momentum5m:round(pctMove(price,c.at(-6)),3),
+    momentum15m:round(pctMove(price,c.at(-16)),3),momentum30m:round(pctMove(price,c.at(-31)),3),momentum5mTF:round(pctMove(c5.at(-1),c5.at(-4)),3),
+    ema9:round(e9,8),ema21:round(e21,8),ema50:round(e50,8),ema20_5m:round(ema(c5.slice(-40),20),8),ema50_5m:round(ema(c5.slice(-70),50),8),
+    breakoutUp:price>recentHigh*0.9995,breakoutDown:price<recentLow*1.0005,high20:recentHigh,low20:recentLow};
+}
+function avg(a){if(!a.length)return '—';const x=a.reduce((s,n)=>s+num(n,0),0)/a.length;return `${x>=0?'+':''}${x.toFixed(2)}%`;}
+async function buildMarketSnapshot(){
+  const candidates=[...ticks.entries()].filter(([s,t])=>marketInfo.has(s)&&t.price>0).sort((a,b)=>num(b[1].volume,0)-num(a[1].volume,0)).slice(0,cfg.aiTopSymbols);
+  const rows=[];
+  for(const [symbol] of candidates){try{const [k1,k5]=await Promise.all([fetchKlines(symbol,'1m'),fetchKlines(symbol,'5m',70)]);rows.push({...analyzeKlines(symbol,k1,k5),quoteVolume24h:round(num(ticks.get(symbol)?.volume,0),0)});}catch{} }
+  rows.sort((a,b)=>Math.max(Math.abs(b.momentum5m),Math.abs(b.momentum15m))-Math.max(Math.abs(a.momentum5m),Math.abs(a.momentum15m)));
+  state.warmSymbols=rows.length; state.ranking=rows.slice(0,20); state.candidates=rows.length;
+  const ln=rows.filter(x=>x.bias==='LONG').length,sn=rows.filter(x=>x.bias==='SHORT').length;
+  state.longPct=rows.length?Math.round(ln/rows.length*100):50; state.shortPct=100-state.longPct;
+  const a15=rows.length?rows.reduce((s,x)=>s+x.momentum15m,0)/rows.length:0;
+  state.regime=state.longPct>=62&&a15>0?'ALCISTA':state.shortPct>=62&&a15<0?'BAJISTA':'MIXTO';
+  state.timeframes={'20s':'tick','1m':avg(rows.map(x=>x.momentum1m)),'3m':avg(rows.map(x=>x.momentum5m)),'5m':avg(rows.map(x=>x.momentum5mTF))};
+  return rows;
+}
+function marginCapacity(positions=state.positions,equity=state.equity){const eq=Math.max(0,num(equity,cfg.capital));const used=positions.reduce((s,p)=>s+num(p.margin,0),0);return Math.max(0,Math.min(eq*cfg.maxPositionMarginPct/100,eq*cfg.maxTotalMarginPct/100-used));}
+function riskAllowsOpen(symbol,margin){
+  if(stopRequested||state.stopped)return {ok:false,reason:'STOP'};
+  if(state.positions.length>=cfg.maxPositions)return {ok:false,reason:'MAX_POSITIONS'};
+  if(margin<=0)return {ok:false,reason:'NO_MARGIN'};
+  const used=state.positions.reduce((s,p)=>s+num(p.margin,0),0),maxTotal=num(state.equity,0)*cfg.maxTotalMarginPct/100;
+  if(used+margin>maxTotal+1e-9)return {ok:false,reason:'MAX_TOTAL_MARGIN'};
+  if(Math.max(0,-state.dailyLossPct)>=cfg.maxDailyLossPct)return {ok:false,reason:'DAILY_LOSS'};
+  if(state.drawdownPct>=cfg.maxDrawdownPct)return {ok:false,reason:'MAX_DRAWDOWN'};
+  if((cooldown.get(symbol)||0)>now())return {ok:false,reason:'COOLDOWN'};
+  return {ok:true};
+}
+function cleanJsonText(t){let s=String(t||'').trim();if(s.startsWith('```'))s=s.replace(/^```(?:json)?/i,'').replace(/```$/i,'').trim();const a=s.indexOf('{'),b=s.lastIndexOf('}');return a>=0&&b>a?s.slice(a,b+1):s;}
+async function askAI(market,account){
+  if(!cfg.openaiKey)throw new Error('OPENAI_API_KEY no configurada');
+  const payload={timestamp:new Date().toISOString(),regime:state.regime,longPct:state.longPct,shortPct:state.shortPct,equity:state.equity,
+    positions:(account.positions||[]).map(p=>({symbol:p.symbol,side:p.side,entry:p.entry,mark:p.mark,pnl:p.pnl,margin:p.margin})),market:market.slice(0,cfg.aiTopSymbols)};
+  const instructions=`Eres GALAXI, un motor autónomo de decisión para Binance USD-M Futures. Analiza el snapshot completo antes de decidir. No uses un score fijo. Integra estructura, momentum multitemporal, EMA, RSI, ATR, volumen, rupturas, régimen y posiciones abiertas. Busca LONG y SHORT; no repitas símbolos sin una tesis nueva. Puedes usar HOLD. Puedes abrir como máximo ${cfg.maxActionsPerCycle} acciones por ciclo. Usa sólo símbolos presentes en market. CLOSE sólo para posiciones existentes. margin_pct debe estar entre 0.25 y ${cfg.maxPositionMarginPct}. confidence es 0-100. No inventes datos. Los límites de riesgo del sistema son obligatorios. Devuelve sólo JSON.`;
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),cfg.aiTimeoutMs);
+  try{
+    const res=await fetch('https://api.openai.com/v1/responses',{method:'POST',signal:controller.signal,headers:{Authorization:`Bearer ${cfg.openaiKey}`,'Content-Type':'application/json'},body:JSON.stringify({model:cfg.openaiModel,instructions,input:JSON.stringify(payload),text:{format:{type:'json_schema',name:'galaxi_trade_decision',strict:true,schema:{type:'object',additionalProperties:false,properties:{regime:{type:'string',enum:['ALCISTA','BAJISTA','MIXTO']},actions:{type:'array',maxItems:cfg.maxActionsPerCycle,items:{type:'object',additionalProperties:false,properties:{action:{type:'string',enum:['OPEN_LONG','OPEN_SHORT','CLOSE','HOLD']},symbol:{type:'string'},margin_pct:{type:'number'},reason:{type:'string'},confidence:{type:'number'}},required:['action','symbol','margin_pct','reason','confidence']}},summary:{type:'string'}},required:['regime','actions','summary']}}}})});
+    const text=await res.text(); if(!res.ok)throw new Error(`OPENAI ${res.status}: ${text.slice(0,400)}`);
+    const data=JSON.parse(text); const output=data.output_text||data.output?.flatMap(x=>x.content||[]).find(x=>x.type==='output_text')?.text||'';
+    const decision=JSON.parse(cleanJsonText(output)); state.aiCalls++; return sanitizeDecision(decision,market,account.positions||[]);
+  }finally{clearTimeout(timer);}
+}
+function sanitizeDecision(d,market,positions){
+  const allowed=new Set(market.map(x=>x.symbol)),held=new Set(positions.map(x=>x.symbol));
+  const actions=[];
+  for(const raw of Array.isArray(d?.actions)?d.actions:[]){
+    const a={action:String(raw.action||'HOLD'),symbol:String(raw.symbol||''),margin_pct:clamp(num(raw.margin_pct,1),0.25,cfg.maxPositionMarginPct),reason:String(raw.reason||''),confidence:clamp(num(raw.confidence,0),0,100)};
+    if(!['OPEN_LONG','OPEN_SHORT','CLOSE','HOLD'].includes(a.action))continue;
+    if(a.action==='HOLD'){actions.push(a);continue;}
+    if(!allowed.has(a.symbol))continue;
+    if(a.action==='CLOSE'&&!held.has(a.symbol))continue;
+    if((a.action==='OPEN_LONG'||a.action==='OPEN_SHORT')&&held.has(a.symbol))continue;
+    actions.push(a); if(actions.length>=cfg.maxActionsPerCycle)break;
+  }
+  return {regime:['ALCISTA','BAJISTA','MIXTO'].includes(d?.regime)?d.regime:'MIXTO',actions,summary:String(d?.summary||'IA evaluó el mercado').slice(0,500)};
+}
+async function getLiveAccount(){
+  if(!cfg.binanceKey||!cfg.binanceSecret)throw new Error('BINANCE API no configurada');
+  const [account,pos]=await Promise.all([rest('/fapi/v2/account',{},true),rest('/fapi/v2/positionRisk',{},true)]);
+  const positions=(pos||[]).filter(p=>Math.abs(num(p.positionAmt,0))>0).map(p=>{const amt=num(p.positionAmt,0),entry=num(p.entryPrice,0),mark=num(p.markPrice,0),pnl=num(p.unRealizedProfit,0);return{symbol:p.symbol,side:amt>0?'LONG':'SHORT',qty:Math.abs(amt),entry,mark,pnl,margin:Math.abs(num(p.notional,0))/Math.max(1,cfg.leverage)};});
+  const wallet=num(account.totalWalletBalance,0),unreal=num(account.totalUnrealizedProfit,0);
+  return {equity:wallet+unreal,wallet,unrealizedPnl:unreal,positions};
+}
+function paperAccount(){return{equity:state.equity,wallet:state.equity,unrealizedPnl:state.unrealizedPnl,positions:state.positions.map(p=>({symbol:p.symbol,side:p.side,qty:p.qty,entry:p.entry,mark:p.current,pnl:p.pnl,margin:p.margin}))};}
+async function setLeverage(symbol){await rest('/fapi/v1/leverage',{method:'POST',params:{symbol,leverage:cfg.leverage}},true);}
+async function placeMarketOrder(symbol,side,qty,reduceOnly=false){
+  if(!cfg.binanceKey||!cfg.binanceSecret)throw new Error('BINANCE API no configurada');
+  const q=normalizeQty(symbol,qty),m=marketInfo.get(symbol); if(!(q>0)||q<(m?.minQty||0))throw new Error(`Cantidad inválida ${symbol}`);
+  if(now()-lastOrderTs<cfg.minSecondsBetweenOrders*1000)throw new Error('Protección: intervalo mínimo entre órdenes');
+  await setLeverage(symbol);
+  const params={symbol,side,type:'MARKET',quantity:q,newOrderRespType:'RESULT'};if(reduceOnly)params.reduceOnly='true';
+  const order=await rest('/fapi/v1/order',{method:'POST',params},true);lastOrderTs=now();return order;
+}
+async function placeProtection(symbol,positionSide,entry){
+  const m=marketInfo.get(symbol); if(!m||!(entry>0))return;
+  const exitSide=positionSide==='LONG'?'SELL':'BUY';
+  const sl=normalizePrice(symbol,positionSide==='LONG'?entry*(1-cfg.paperSlPct/100):entry*(1+cfg.paperSlPct/100));
+  const tp=normalizePrice(symbol,positionSide==='LONG'?entry*(1+cfg.paperTpPct/100):entry*(1-cfg.paperTpPct/100));
+  const common={symbol,workingType:'MARK_PRICE',priceProtect:'TRUE',closePosition:'true'};
+  await rest('/fapi/v1/order',{method:'POST',params:{...common,side:exitSide,type:'STOP_MARKET',stopPrice:sl}},true);
+  await rest('/fapi/v1/order',{method:'POST',params:{...common,side:exitSide,type:'TAKE_PROFIT_MARKET',stopPrice:tp}},true);
+}
+async function cancelSymbolOrders(symbol){try{await rest('/fapi/v1/allOpenOrders',{method:'DELETE',params:{symbol}},true);}catch(e){pushHistory({action:'ORDER_CANCEL_ERROR',symbol,reason:e.message});}}
+async function executeLiveAction(a){
+  if(!cfg.liveArmed)throw new Error('LIVE bloqueado: LIVE_ARMED=false');
+  const live=await getLiveAccount(),existing=live.positions.find(p=>p.symbol===a.symbol);
+  if(a.action==='CLOSE'){
+    if(!existing)return {skipped:true,reason:'NO_POSITION'};
+    await cancelSymbolOrders(existing.symbol); const side=existing.side==='LONG'?'SELL':'BUY';
+    const order=await placeMarketOrder(existing.symbol,side,existing.qty,true); pushHistory({action:'LIVE_CLOSE',symbol:existing.symbol,side:existing.side,orderId:order.orderId,reason:a.reason}); return{order};
+  }
+  if(a.action==='OPEN_LONG'||a.action==='OPEN_SHORT'){
+    if(existing)return{skipped:true,reason:'SYMBOL_ALREADY_OPEN'};
+    const margin=Math.min(live.equity*clamp(num(a.margin_pct,1),0.25,cfg.maxPositionMarginPct)/100,marginCapacity(live.positions,live.equity));
+    const liveUsed=live.positions.reduce((s,p)=>s+num(p.margin,0),0);
+    if(live.positions.length>=cfg.maxPositions)return{skipped:true,reason:'MAX_POSITIONS'};
+    if(liveUsed+margin>live.equity*cfg.maxTotalMarginPct/100+1e-9)return{skipped:true,reason:'MAX_TOTAL_MARGIN'};
+    if(Math.max(0,-state.dailyLossPct)>=cfg.maxDailyLossPct||state.drawdownPct>=cfg.maxDrawdownPct)return{skipped:true,reason:'RISK_STOP'};
+    const risk=riskAllowsOpen(a.symbol,margin);if(!risk.ok)return{skipped:true,reason:risk.reason};
+    const price=num(ticks.get(a.symbol)?.price,0);if(!(price>0))return{skipped:true,reason:'NO_PRICE'};
+    const qty=normalizeQty(a.symbol,margin*cfg.leverage/price);if(!(qty>0))return{skipped:true,reason:'QTY_TOO_SMALL'};
+    const side=a.action==='OPEN_LONG'?'BUY':'SELL'; const order=await placeMarketOrder(a.symbol,side,qty,false);
+    const fill=num(order.avgPrice,price); await placeProtection(a.symbol,a.action==='OPEN_LONG'?'LONG':'SHORT',fill);
+    cooldown.set(a.symbol,now()+60000); pushHistory({action:'LIVE_OPEN',symbol:a.symbol,side:a.action==='OPEN_LONG'?'LONG':'SHORT',qty,margin,orderId:order.orderId,entry:fill,reason:a.reason}); return{order};
+  }
+  return{skipped:true,reason:'HOLD'};
+}
+function paperOpen(a){
+  if(state.positions.some(p=>p.symbol===a.symbol))return{skipped:true,reason:'SYMBOL_ALREADY_OPEN'};
+  const margin=Math.min(state.equity*clamp(num(a.margin_pct,1),0.25,cfg.maxPositionMarginPct)/100,marginCapacity());const risk=riskAllowsOpen(a.symbol,margin);if(!risk.ok)return{skipped:true,reason:risk.reason};
+  const price=num(ticks.get(a.symbol)?.price,0);if(!(price>0)||!(margin>0))return{skipped:true,reason:'NO_PRICE_OR_MARGIN'};
+  const side=a.action==='OPEN_LONG'?'LONG':'SHORT',qty=margin*cfg.leverage/price;
+  state.positions.push({id:`AI_${now()}_${Math.random().toString(36).slice(2,8)}`,symbol:a.symbol,side,entry:price,current:price,margin,qty,pnl:0,unrealizedPct:0,leverage:cfg.leverage,confidence:a.confidence,strategy:'AI',thesis:a.reason,openedAt:new Date().toISOString(),openedTs:now()});
+  cooldown.set(a.symbol,now()+60000);pushHistory({action:'AI_OPEN',symbol:a.symbol,side,margin,reason:a.reason});return{opened:true};
+}
+function paperClose(a){const p=state.positions.find(x=>x.symbol===a.symbol);if(!p)return{skipped:true,reason:'NO_POSITION'};const t=ticks.get(p.symbol);if(t?.price)p.current=t.price;const move=p.side==='LONG'?p.current-p.entry:p.entry-p.current;p.pnl=move*p.qty;state.realizedPnl+=p.pnl;state.todayPnl+=p.pnl;state.positions=state.positions.filter(x=>x.id!==p.id);cooldown.set(p.symbol,now()+60000);pushHistory({action:'AI_CLOSE',symbol:p.symbol,side:p.side,pnl:round(p.pnl,4),reason:a.reason});return{closed:true};}
+function markPaperPositions(){
+  const keep=[],t=now();
+  for(const p of state.positions){const tick=ticks.get(p.symbol);if(tick?.price)p.current=tick.price;const move=p.side==='LONG'?p.current-p.entry:p.entry-p.current;p.pnl=move*p.qty;p.unrealizedPct=p.margin?p.pnl/p.margin*100:0;const age=t-p.openedTs;const tp=p.unrealizedPct>=cfg.paperTpPct,sl=p.unrealizedPct<=-cfg.paperSlPct,timeout=age>=cfg.paperMaxHoldMs;
+    if(tp||sl||timeout){state.realizedPnl+=p.pnl;state.todayPnl+=p.pnl;pushHistory({action:'RISK_CLOSE',symbol:p.symbol,side:p.side,pnl:round(p.pnl,4),reason:tp?'TP':sl?'SL':'TIME'});cooldown.set(p.symbol,t+60000);}else keep.push(p);
+  } state.positions=keep;
+}
+function emergencyStopCheck(){
+  if(fs.existsSync(controlFile)){try{const c=JSON.parse(fs.readFileSync(controlFile,'utf8'));if(c.stop)stopRequested=true;}catch{}}
+  if(state.drawdownPct>=cfg.maxDrawdownPct||Math.max(0,-state.dailyLossPct)>=cfg.maxDailyLossPct){stopRequested=true;state.stopped=true;state.lastSignal='STOP AUTOMÁTICO POR RIESGO';}
+  if(stopRequested)state.stopped=true;
+}
+function connect(){
+  if(ws){try{ws.removeAllListeners();ws.close();}catch{}}
+  try{ws=new WebSocket(cfg.wsUrl);ws.on('open',()=>{state.wsConnected=1;state.lastError=null;console.log('WS_CONNECTED=1');});ws.on('close',()=>{state.wsConnected=0;if(!stopRequested&&!reconnectTimer)reconnectTimer=setTimeout(()=>{reconnectTimer=null;connect();},3000);});ws.on('error',e=>{state.lastError=`WebSocket: ${e.message||'error'}`;});ws.on('message',raw=>{try{const arr=JSON.parse(raw.toString());if(!Array.isArray(arr))return;const ts=now();for(const t of arr){const s=t.s;if(!s?.endsWith('USDT')||!marketInfo.has(s))continue;const price=num(t.c,0);if(price>0)ticks.set(s,{price,volume:num(t.q,0),ts});}}catch(e){state.lastError=`WS parse: ${e.message}`;}});}catch(e){state.lastError=`WS init: ${e.message}`;}
+}
+async function runCycle(){
+  if(loopBusy||stopRequested)return;loopBusy=true;const started=now();
+  try{emergencyStopCheck();state.cycle++;if(state.stopped){state.running=false;writeState();return;}if(!state.wsConnected){state.lastSignal='Esperando WebSocket de Binance…';writeState();return;}
+    const market=await buildMarketSnapshot();if(market.length<5){state.lastSignal='Calentando datos de mercado…';writeState();return;}
+    if(cfg.mode==='PAPER')markPaperPositions();else{lastAccount=await getLiveAccount();state.equity=lastAccount.equity;state.unrealizedPnl=lastAccount.unrealizedPnl;state.positions=lastAccount.positions;}
+    const account=cfg.mode==='LIVE'?lastAccount:paperAccount();const decision=await askAI(market,account);state.aiDecision=decision;state.aiReasoning=decision.summary;state.regime=decision.regime;state.riskApproved=0;
+    for(const a of decision.actions){if(a.action==='HOLD')continue;try{const result=cfg.mode==='PAPER'?(a.action==='OPEN_LONG'||a.action==='OPEN_SHORT'?paperOpen(a):paperClose(a)):await executeLiveAction(a);if(result?.opened||result?.closed||result?.order)state.riskApproved++;}catch(e){state.lastError=`${cfg.mode} action: ${e.message}`;pushHistory({action:`${cfg.mode}_ERROR`,symbol:a.symbol,reason:e.message});}}
+    state.lastSignal=decision.summary;state.lastCycleMs=now()-started;
+  }catch(e){state.aiErrors++;state.lastError=e?.message||String(e);console.error('CYCLE_ERROR',state.lastError);}finally{writeState();loopBusy=false;}
+}
+async function start(){
+  console.log(`GALAXI V22 | mode=${cfg.mode} | model=${cfg.openaiModel} | scan=${cfg.scanMs}ms`);
+  if(!cfg.openaiKey)console.warn('OPENAI_API_KEY missing: AI disabled until configured.');
+  if(cfg.mode==='LIVE'&&(!cfg.liveArmed||!cfg.binanceKey||!cfg.binanceSecret))console.warn('LIVE no armado/configurado: no se enviarán órdenes.');
+  try{await syncServerTime();await loadExchangeInfo();connect();await sleep(5000);writeState();await runCycle();intervalHandle=setInterval(runCycle,cfg.scanMs);}catch(e){state.lastError=`BOOT: ${e.message}`;writeState();console.error('BOOT_ERROR',e.message);throw e;}
+}
+function stop(){stopRequested=true;state.stopped=true;state.running=false;if(intervalHandle)clearInterval(intervalHandle);if(reconnectTimer)clearTimeout(reconnectTimer);try{ws?.close();}catch{}writeState();}
+process.on('SIGTERM',()=>{stop();process.exit(0);});process.on('SIGINT',()=>{stop();process.exit(0);});
+writeState();
+export { cfg, state, start, stop, runCycle };
