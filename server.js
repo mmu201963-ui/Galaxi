@@ -13,7 +13,10 @@ app.post('/api/stop', (_req,res)=>{fs.writeFileSync('galaxi-control.json',JSON.s
 const publicDir = new URL('./public/', import.meta.url).pathname;
 app.use(express.static(publicDir));
 app.get('/', (_req,res)=>res.sendFile(new URL('./public/index.html', import.meta.url).pathname));
-app.get('*', (_req,res)=>res.sendFile(new URL('./public/index.html', import.meta.url).pathname));
+app.use((req,res,next)=>{
+  if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+  res.sendFile(new URL('./public/index.html', import.meta.url).pathname);
+});
 
 const port=Number(process.env.PORT||3000);
 const server=http.createServer(app);
