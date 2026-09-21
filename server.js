@@ -3,60 +3,74 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// Start the trading engine in the same Railway process.
+import './index.js';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
-const PORT = Number(process.env.PORT || 3000);
-const RUNTIME = path.join(__dirname, 'galaxi-runtime.json');
-const CONTROL = path.join(__dirname, 'galaxi-control.json');
+const port = Number(process.env.PORT || 3000);
+const runtimeFile = path.join(__dirname, 'galaxi-runtime.json');
+const controlFile = path.join(__dirname, 'galaxi-control.json');
 
 app.disable('x-powered-by');
 app.use(express.json({ limit: '32kb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(__dirname, { index: 'index.html', extensions: ['html'] }));
 
-function readJson(file, fallback) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
-  catch { return fallback; }
+function readState() {
+  try {
+    return JSON.parse(fs.readFileSync(runtimeFile, 'utf8'));
+  } catch {
+    return {
+      mode: process.env.TRADING_MODE || 'PAPER',
+      aiModel: process.env.OPENAI_MODEL || 'NO_CONFIGURADO',
+      equity: Number(process.env.PAPER_START_CAPITAL || 10000),
+      positions: [],
+      history: []
+    };
+  }
 }
 
-app.get('/health', (_req, res) => res.status(200).json({ ok: true, service: 'GALAXI', time: new Date().toISOString() }));
+app.get('/health', (_req, res) => {
+  res.status(200).json({ ok: true, service: 'GALAXI V22', time: new Date().toISOString() });
+});
 
 app.get('/api/status', (_req, res) => {
-  const state = readJson(RUNTIME, {
-    mode: process.env.TRADING_MODE || 'PAPER',
-    aiModel: process.env.OPENAI_MODEL || 'IA',
-    equity: Number(process.env.PAPER_START_CAPITAL || 10000),
-    realizedPnl: 0, unrealizedPnl: 0, drawdownPct: 0,
-    cycle: 0, wsConnected: false, symbols: 0, warmSymbols: 0,
-    positions: [], aiDecision: {}, logs: []
+  const s = readState();
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.json({
+    ...s,
+    logs: Array.isArray(s.history) ? s.history.map(x => ({ time: x.time, line: x.line })) : [],
+    warmSymbols: s.warmSymbols || 0
   });
-  res.set('Cache-Control', 'no-store');
-  res.json(state);
 });
 
 app.post('/api/stop', (_req, res) => {
-  fs.writeFileSync(CONTROL, JSON.stringify({ stop: true, at: new Date().toISOString() }, null, 2));
-  res.json({ ok: true, stopped: true });
+  fs.writeFileSync(controlFile, JSON.stringify({ stop: true, at: new Date().toISOString() }, null, 2));
+  res.json({ ok: true, stop: true });
 });
 
-// Express 5 rejects app.get('*'). Use a final middleware instead of a wildcard route.
-app.use((req, res) => {
-  if (req.method !== 'GET') return res.status(404).json({ error: 'Not found' });
-  res.sendFile(path.join(__dirname, 'public', 'index.html'), err => {
-    if (err && !res.headersSent) res.status(err.statusCode || 404).end();
-  });
+// Express 5 does not accept app.get('*') here; this fallback is deliberately
+// registered as middleware so SPA/dashboard routes cannot crash the process.
+app.use((req, res, next) => {
+  if (req.method !== 'GET' || req.path.startsWith('/api/') || req.path === '/health') return next();
+  res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`GALAXI WEB listening on ${PORT}`);
+app.use((err, _req, res, _next) => {
+  console.error('HTTP_ERROR', err);
+  if (res.headersSent) return;
+  res.status(500).json({ ok: false, error: 'Internal server error' });
 });
 
-// Start the trading engine after the HTTP server is ready so Railway health checks
-// can reach the dashboard even if the engine later has a transient upstream error.
-import('./index.js').catch(err => console.error('ENGINE_IMPORT_ERROR', err));
+const server = app.listen(port, '0.0.0.0', () => {
+  console.log(`GALAXI WEB listening on ${port}`);
+});
 
-function shutdown() {
-  try { server.close(); } catch {}
-  process.exit(0);
-}
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+server.on('error', err => {
+  console.error('SERVER_ERROR', err);
+  process.exit(1);
+});
+
+process.on('SIGTERM', () => {
+  server.close(() => process.exit(0));
+});
