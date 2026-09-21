@@ -1,14 +1,28 @@
-# GALAXI V22
+# GALAXI V22 FINAL
 
-Autonomous Binance USD-M Futures engine with an OpenAI decision layer.
+Motor autónomo para Binance USD-M con decisiones LONG/SHORT/CLOSE/HOLD mediante OpenAI Responses API.
 
-## Safety defaults
-- `TRADING_MODE=PAPER`
-- `LIVE_ARMED=false`
-- API secrets belong only in Railway Variables.
+## Railway Variables
 
-## LIVE
-Set both `TRADING_MODE=LIVE` and `LIVE_ARMED=true` only when intentionally enabling real orders. V22 places entry orders and exchange-side protective STOP_MARKET / TAKE_PROFIT_MARKET reduce-only orders, reconciles account state, respects exchange filters, and has a file kill switch.
+- `TRADING_MODE=PAPER` para validar primero sin dinero real.
+- `OPENAI_API_KEY` = tu clave de OpenAI (Railway Secret).
+- `OPENAI_MODEL=gpt-5.6-luna` (o un modelo disponible en tu cuenta).
+- `BINANCE_API_KEY` y `BINANCE_API_SECRET` sólo como Railway Secrets si vas a usar LIVE.
+- `LIVE_ARMED=false` mientras se valida PAPER.
+- `MAX_POSITIONS=12`
+- `LEVERAGE=5`
+- `SCAN_INTERVAL_MS=20000`
 
-## Important
-The AI decides among OPEN_LONG, OPEN_SHORT, CLOSE and HOLD. It does not control hard risk limits. No strategy guarantees profit.
+Para LIVE, cambia deliberadamente:
+- `TRADING_MODE=LIVE`
+- `LIVE_ARMED=true`
+
+No pegues claves en el chat.
+
+## Correcciones de esta versión
+
+1. Las claves de Binance sólo se envían en endpoints firmados; las llamadas públicas no llevan `X-MBX-APIKEY`.
+2. Las claves se validan antes de crear headers para evitar el error `ByteString`.
+3. Modelo por defecto: `gpt-5.6-luna`.
+4. El wrapper web permanece disponible aunque el motor hijo se reinicie.
+5. `/api/health`, `/api/status`, `/api/start` y `/api/stop`.
