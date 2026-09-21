@@ -22,7 +22,9 @@ const cfg = {
   feePct: Number(process.env.PAPER_FEE_PCT || 0.04),
   leverage: Math.min(20, Math.max(1, Number(process.env.PAPER_LEVERAGE || 5))),
   apiBase: process.env.BINANCE_FUTURES_REST || 'https://fapi.binance.com',
-  wsUrl: process.env.BINANCE_FUTURES_WS || 'wss://fstream.binance.com/ws/!miniTicker@arr'
+  wsUrl: process.env.BINANCE_FUTURES_WS || 'wss://fstream.binance.com/ws/!miniTicker@arr',
+  tickerPollMs: Math.max(5000, Number(process.env.TICKER_POLL_MS || 5000)),
+  maxTickerSymbols: Math.min(500, Math.max(50, Number(process.env.MAX_TICKER_SYMBOLS || 250)))
 };
 
 const state = {
@@ -40,7 +42,7 @@ const ticks = new Map();
 const tickSeries = new Map();
 const candles = new Map();
 const cooldown = new Map();
-let ws = null, stopped = false, reconnectTimer = null, lastCandleRefresh = 0, loopTimer = null;
+let ws = null, stopped = false, reconnectTimer = null, lastCandleRefresh = 0, loopTimer = null, tickerTimer = null, wsLastMessage = 0;
 
 const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
 const pctMove = (now, then) => then > 0 ? (now / then - 1) * 100 : 0;
@@ -329,16 +331,54 @@ async function refreshCandles() {
   lastCandleRefresh = Date.now();
   state.dataQuality = `TICKS + KLINES ${Math.min(top.length, cfg.candleSymbols)}`;
 }
+async function refreshTickerRest() {
+  if (stopped) return;
+  try {
+    const u = new URL('/fapi/v1/ticker/24hr', cfg.apiBase);
+    state.restCalls++;
+    const r = await fetch(u, { headers: { 'User-Agent': 'GALAXI/21' } });
+    if (r.status === 429) { state.rate429++; throw new Error('Binance REST 429'); }
+    if (r.status === 418) { state.rate418++; throw new Error('Binance REST 418'); }
+    if (!r.ok) throw new Error(`Binance REST ticker ${r.status}`);
+    const data = await r.json();
+    if (!Array.isArray(data)) throw new Error('Binance REST ticker formato inválido');
+    const now = Date.now();
+    const usable = data
+      .filter(t => String(t.symbol || '').endsWith('USDT') && Number(t.lastPrice) > 0)
+      .sort((a,b) => Number(b.quoteVolume||0) - Number(a.quoteVolume||0))
+      .slice(0, cfg.maxTickerSymbols);
+    for (const t of usable) {
+      const symbol = String(t.symbol);
+      const price = Number(t.lastPrice);
+      const volume = Number(t.quoteVolume || 0);
+      ticks.set(symbol, { price, volume, ts: now });
+      pushTick(symbol, { price, volume, ts: now });
+    }
+    state.dataQuality = state.wsConnected ? `WS + REST ${usable.length}` : `REST ${usable.length}`;
+    if (!state.wsConnected) state.lastError = null;
+  } catch (e) {
+    state.lastError = `REST ticker: ${e.message}`;
+  }
+}
+function startTickerFallback() {
+  clearInterval(tickerTimer);
+  refreshTickerRest();
+  tickerTimer = setInterval(() => {
+    if (!stopped && (!state.wsConnected || Date.now() - wsLastMessage > cfg.tickerPollMs * 2)) refreshTickerRest();
+  }, cfg.tickerPollMs);
+}
+
 function connect() {
   try {
     ws = new WebSocket(cfg.wsUrl);
-    ws.on('open', () => { state.wsConnected = 1; state.lastError = null; console.log('WS_CONNECTED=1'); });
+    ws.on('open', () => { state.wsConnected = 1; wsLastMessage = Date.now(); state.lastError = null; console.log('WS_CONNECTED=1'); });
     ws.on('close', () => {
       state.wsConnected = 0;
       if (!stopped && !reconnectTimer) reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, 3000);
     });
     ws.on('error', () => { state.lastError = 'WebSocket error'; });
     ws.on('message', raw => {
+      wsLastMessage = Date.now();
       try {
         const arr = JSON.parse(raw.toString()); if (!Array.isArray(arr)) return;
         const now = Date.now();
@@ -374,5 +414,6 @@ async function loop() {
 
 console.log(`GALAXI | mode=${cfg.mode} | capital=${cfg.capital} | scan=${cfg.interval}ms | candles=${cfg.candleSymbols}`);
 connect();
+startTickerFallback();
 loop();
-process.on('SIGTERM', () => { stopped = true; clearTimeout(loopTimer); try { ws?.close(); } catch {} write(); process.exit(0); });
+process.on('SIGTERM', () => { stopped = true; clearTimeout(loopTimer); clearInterval(tickerTimer); try { ws?.close(); } catch {} write(); process.exit(0); });

@@ -9,9 +9,7 @@ const HOST = '0.0.0.0';
 const root = path.dirname(fileURLToPath(import.meta.url));
 const runtimeFile = path.join(root, 'galaxi-runtime.json');
 const controlFile = path.join(root, 'galaxi-control.json');
-const htmlPath = fs.existsSync(path.join(root, 'public/index.html'))
-  ? path.join(root, 'public/index.html')
-  : path.join(root, 'index.html');
+const htmlPath = path.join(root, 'public/index.html');
 
 const state = { running:false, mode:String(process.env.TRADING_MODE||'PAPER').toUpperCase(), lastError:null, chat:[] };
 let child = null, alive = false;
@@ -40,16 +38,7 @@ const server=http.createServer(async(req,res)=>{
   if(u.pathname==='/api/chat'&&req.method==='POST'){try{const b=await readBody(req),msg=String(b.message||''),reply=chatReply(msg);state.chat=[...(state.chat||[]),{role:'user',text:msg,time:Date.now()},{role:'galaxi',text:reply,time:Date.now()}].slice(-40);return json(res,{ok:true,reply});}catch(e){return json(res,{ok:false,error:e.message},400);}}
   if(u.pathname==='/api/stop'&&req.method==='POST'){try{fs.writeFileSync(controlFile,JSON.stringify({stop:true,time:Date.now()}));return json(res,{ok:true,message:'STOP GALAXI activado.'});}catch(e){return json(res,{ok:false,error:e.message},500);}}
   if(u.pathname==='/api/resume'&&req.method==='POST'){try{fs.writeFileSync(controlFile,JSON.stringify({stop:false,time:Date.now()}));if(!alive)start();return json(res,{ok:true,message:'GALAXI reanudado.'});}catch(e){return json(res,{ok:false,error:e.message},500);}}
-  if(u.pathname==='/'||u.pathname==='/index.html'){
-    try {
-      const html=fs.readFileSync(htmlPath,'utf8');
-      res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store'});
-      return res.end(html);
-    } catch(e) {
-      state.lastError='index.html: '+e.message;
-      return json(res,{ok:false,error:'Frontend not found: '+e.message},500);
-    }
-  }
+  if(u.pathname==='/'||u.pathname==='/index.html'){res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store'});return res.end(fs.readFileSync(htmlPath,'utf8'));}
   res.writeHead(404);res.end('Not found');
 });
 function start(){child=spawn(process.execPath,['index.js'],{cwd:root,env:process.env,stdio:['ignore','pipe','pipe']});alive=true;state.running=true;child.stdout.on('data',d=>process.stdout.write(d));child.stderr.on('data',d=>process.stderr.write(d));child.on('exit',(code,signal)=>{alive=false;state.running=false;if(code!==0)state.lastError=`index.js terminó code=${code} signal=${signal||''}`;});}

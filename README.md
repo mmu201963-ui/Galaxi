@@ -18,3 +18,7 @@ This delivery is **PAPER only**. It does not contain Binance API credentials and
 Do not switch to LIVE by merely changing an environment variable. A real execution layer still needs authenticated Binance order placement, order/position reconciliation, idempotency, exchange filters, reduce-only exits, error/rate-limit handling, and an authenticated user-data stream.
 
 Binance recommends using WebSocket user-data updates for order and position state because REST responses can be delayed during volatile markets.
+
+
+## V21 HOTFIX — datos de mercado
+Si el WebSocket de Binance no entrega datos desde el proveedor de hosting, GALAXI usa automáticamente REST `/fapi/v1/ticker/24hr` como respaldo y continúa construyendo series y análisis. El WebSocket sigue siendo preferente cuando está disponible.
