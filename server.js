@@ -10,8 +10,10 @@ app.use(express.json());
 app.get('/health', (_req,res)=>res.json({ok:true,service:'GALAXI',mode:cfg.mode,running:state.running,cycle:state.cycle,wsConnected:state.wsConnected,lastError:state.lastError}));
 app.get('/api/state', (_req,res)=>res.json(state));
 app.post('/api/stop', (_req,res)=>{fs.writeFileSync('galaxi-control.json',JSON.stringify({stop:true,at:new Date().toISOString()},null,2));stop();res.json({ok:true,stopped:true});});
-app.use(express.static('public'));
-app.get(/.*/, (_req,res)=>res.sendFile(process.cwd()+'/public/index.html'));
+const publicDir = new URL('./public/', import.meta.url).pathname;
+app.use(express.static(publicDir));
+app.get('/', (_req,res)=>res.sendFile(new URL('./public/index.html', import.meta.url).pathname));
+app.get('*', (_req,res)=>res.sendFile(new URL('./public/index.html', import.meta.url).pathname));
 
 const port=Number(process.env.PORT||3000);
 const server=http.createServer(app);

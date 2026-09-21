@@ -4,5 +4,6 @@
   "private": true,
   "type": "module",
   "scripts": {"start":"node server.js","check":"node --check index.js && node --check server.js"},
+  "engines": {"node": ">=20"},
   "dependencies": {"cors":"^2.8.5","express":"^5.1.0","ws":"^8.18.0"}
 }
