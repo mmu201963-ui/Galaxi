@@ -1,30 +1,20 @@
 # GALAXI — Autonomous Trader Engine
 
-Base preparada para desplegar en Railway.
+GALAXI is an autonomous **PAPER** trading engine for Binance USDⓈ-M Futures market data.
 
-## Principio
-GALAXI analiza continuamente el universo de Binance Futures mediante WebSocket público y toma decisiones autónomas en PAPER: LONG, SHORT, mantener o cerrar posiciones según el estado del mercado.
+## What changed
+- Dynamic ranking of the available USDT-margined Futures universe.
+- 20s/1m/3m/5m short-term context from live ticks.
+- Real Binance klines for 1m/5m/15m on the highest-volume subset, refreshed independently of the 20s decision loop.
+- EMA, RSI, ATR, volatility, Bollinger width, volume ratio, taker-buy ratio, breakout and multi-timeframe structure are evidence for the decision engine, not universal entry gates.
+- Dynamic LONG/SHORT/HOLD context and thesis-change exits.
+- Diversity/concentration penalty so the engine does not repeatedly select the same correlated style of opportunity.
+- Up to 12 PAPER positions with independent margin sizing, fees, TP, SL, timeout, trailing logic and thesis-flip exit.
+- STOP and RESUME controls.
+- Runtime state and dashboard synchronized through JSON.
 
-Los indicadores son evidencia para el motor; no son reglas rígidas de compra/venta.
+## Important
+This delivery is **PAPER only**. It does not contain Binance API credentials and does not place live orders.
+Do not switch to LIVE by merely changing an environment variable. A real execution layer still needs authenticated Binance order placement, order/position reconciliation, idempotency, exchange filters, reduce-only exits, error/rate-limit handling, and an authenticated user-data stream.
 
-## Estado actual
-- `TRADING_MODE=PAPER` por defecto.
-- Hasta 12 posiciones PAPER.
-- LONG + SHORT.
-- Selección dinámica de símbolos.
-- Análisis 20s / 1m / 3m / 5m.
-- Cierre automático por TP, SL o tiempo máximo.
-- Control de margen total y por posición.
-- Cooldown para evitar reaperturas inmediatas.
-- WebSocket público de Binance Futures.
-- Dashboard y API de estado.
-- STOP mediante `galaxi-control.json`.
-
-## Importante
-Esta entrega NO contiene claves de Binance y NO ejecuta órdenes reales. No cambies a LIVE ni añadas claves hasta validar completamente el motor, la gestión de órdenes y los cierres en un entorno de prueba.
-
-## Railway
-`npm install`
-`npm start`
-
-Variables: ver `.env.example`.
+Binance recommends using WebSocket user-data updates for order and position state because REST responses can be delayed during volatile markets.
