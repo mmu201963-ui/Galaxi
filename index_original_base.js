@@ -42,8 +42,7 @@ const cfg = {
   maxDailyLossPct: Math.min(20, Math.max(0.5, Number(process.env.MAX_DAILY_LOSS_PCT || 5))),
   maxDrawdownPct: Math.min(30, Math.max(1, Number(process.env.MAX_DRAWDOWN_PCT || 10))),
   minSecondsBetweenOrders: Math.max(2, Number(process.env.MIN_SECONDS_BETWEEN_ORDERS || 5)),
-  maxActionsPerCycle: Math.min(4, Math.max(1, Number(process.env.MAX_ACTIONS_PER_CYCLE || 4))),
-  minExpectedNetPct: Math.max(0.05, Number(process.env.MIN_EXPECTED_NET_PCT || 0.20)),
+  maxActionsPerCycle: Math.min(4, Math.max(1, Number(process.env.MAX_ACTIONS_PER_CYCLE || 2))),
 
   paperTpPct: Number(process.env.PAPER_TP_PCT || 1.2),
   paperSlPct: Number(process.env.PAPER_SL_PCT || 0.7),
@@ -534,9 +533,7 @@ async function askAI(market, account) {
     entry: p.entry,
     mark: p.mark,
     pnl: p.pnl,
-    margin: p.margin,
-    unrealizedPct: p.margin ? (Number(p.pnl || 0) / Number(p.margin)) * 100 : 0,
-    ageMinutes: p.openedTs ? Math.max(0, (Date.now() - Number(p.openedTs)) / 60000) : 0
+    margin: p.margin
   }));
 
   const payload = {
@@ -556,28 +553,15 @@ Combina estructura de mercado, momentum multitemporal, RSI, EMA, ATR, volumen, r
 régimen y contexto de las posiciones existentes. Busca oportunidades LONG y SHORT y evita
 abrir repetidamente el mismo símbolo sin una nueva tesis.
 
-OBJETIVO ECONÓMICO PRIORITARIO:
-- Tu objetivo es maximizar el PnL NETO esperado y proteger la equity.
-- No operes por obligación ni por cantidad de posiciones.
-- Solo abras una operación cuando la expectativa neta sea favorable después de spread, comisiones y riesgo y sea de al menos ${cfg.minExpectedNetPct}%.
-- No confundas una tendencia correcta con una entrada rentable: importa el precio actual y el movimiento esperado desde AHORA.
-
-GESTIÓN DE POSICIONES (OBLIGATORIA):
-- En CADA ciclo evalúa las posiciones existentes usando entry, mark, PnL, unrealizedPct, dirección y antigüedad.
-- Una posición NO queda bloqueada por su tesis original. Puedes cerrarla en cualquier ciclo.
-- Si la expectativa futura de una posición es negativa, prioriza CLOSE.
-- Si existe una oportunidad claramente mejor para el capital, puedes cerrar una posición débil y reasignar el margen.
-- No mantengas una posición perdedora solo esperando que vuelva al precio de entrada.
-- HOLD solo cuando conservar la posición tenga expectativa neta favorable.
-
-ACCIONES:
+IMPORTANTE:
+- Puedes elegir HOLD si no hay una tesis suficientemente clara.
+- Puedes abrir como máximo ${cfg.maxActionsPerCycle} acciones nuevas por ciclo.
 - Las acciones permitidas son OPEN_LONG, OPEN_SHORT, CLOSE y HOLD.
-- CLOSE tiene prioridad sobre OPEN cuando una posición existente perdió expectativa positiva.
 - Para CLOSE usa una posición existente.
 - Para OPEN el campo margin_pct es porcentaje de equity destinado a margen, entre 0.25 y 2.
-- Para OPEN debes informar expected_net_pct: utilidad neta esperada en porcentaje desde el precio actual, después de costes.
 - No inventes símbolos. Usa únicamente símbolos presentes en market.
-- No cierres una posición solo por ruido de un tick; utiliza contexto multitemporal y expectativa futura.
+- No cierres una posición sólo por ruido de un tick; evalúa la tesis y el contexto.
+- Si una posición existente ha perdido su tesis, puedes cerrarla.
 - No puedes modificar los límites de riesgo del sistema.
 - Devuelve ÚNICAMENTE JSON válido.
 
@@ -589,9 +573,8 @@ Formato:
       "action": "OPEN_LONG|OPEN_SHORT|CLOSE|HOLD",
       "symbol": "BTCUSDT",
       "margin_pct": 1.0,
-      "reason": "explicación breve basada en expectativa neta actual",
-      "confidence": 0,
-      "expected_net_pct": 0
+      "reason": "explicación breve",
+      "confidence": 0
     }
   ],
   "summary": "resumen breve"
@@ -634,8 +617,7 @@ Formato:
                       symbol: { type: 'string' },
                       margin_pct: { type: 'number' },
                       reason: { type: 'string' },
-                      confidence: { type: 'number' },
-                      expected_net_pct: { type: 'number' }
+                      confidence: { type: 'number' }
                     },
                     required: ['action', 'symbol', 'margin_pct', 'reason', 'confidence']
                   }
@@ -903,19 +885,7 @@ async function executeDecision(decision) {
   state.aiReasoning = decision.summary || '';
   state.regime = decision.regime || state.regime;
 
-  const rawActions = Array.isArray(decision.actions) ? decision.actions : [];
-  // Reject new entries whose declared net expectancy does not clear the minimum edge.
-  const filteredActions = rawActions.filter(a => {
-    if (!a || !['OPEN_LONG','OPEN_SHORT','CLOSE','HOLD'].includes(a.action)) return false;
-    if (a.action === 'OPEN_LONG' || a.action === 'OPEN_SHORT') {
-      return Number(a.expected_net_pct) >= cfg.minExpectedNetPct;
-    }
-    return true;
-  });
-  // Position management has priority: CLOSE decisions execute before new entries.
-  const actions = filteredActions
-    .sort((a, b) => (a.action === 'CLOSE' ? -1 : 0) - (b.action === 'CLOSE' ? -1 : 0))
-    .slice(0, cfg.maxActionsPerCycle);
+  const actions = Array.isArray(decision.actions) ? decision.actions.slice(0, cfg.maxActionsPerCycle) : [];
   state.riskApproved = actions.filter(x => x.action !== 'HOLD').length;
 
   if (cfg.mode === 'PAPER') {
