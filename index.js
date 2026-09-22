@@ -124,6 +124,26 @@ function round(n, d = 6) {
   return Math.round(Number(n) * p) / p;
 }
 
+// OpenAI Responses can return JSON either as plain text or wrapped in a
+// markdown code fence. Normalize only the transport wrapper; never alter the
+// JSON content itself. This helper is intentionally local to the engine so a
+// malformed model response is reported as a JSON error rather than a missing
+// function error.
+function cleanJsonText(value) {
+  let s = String(value ?? '').trim();
+  if (!s) return s;
+
+  if (s.startsWith('```')) {
+    s = s.replace(/^```(?:json)?\s*/i, '');
+    s = s.replace(/\s*```$/i, '');
+  }
+
+  const first = s.indexOf('{');
+  const last = s.lastIndexOf('}');
+  if (first >= 0 && last > first) s = s.slice(first, last + 1);
+  return s.trim();
+}
+
 function writeState() {
   state.portfolioCount = state.positions.length;
   state.unrealizedPnl = state.positions.reduce((s, p) => s + Number(p.pnl || 0), 0);

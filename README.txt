@@ -1,4 +1,4 @@
-GALAXI V24 AI DIAGNOSTIC
+GALAXI V25 AI FIXED
 
 Esta versión parte de GALAXI V23 MULTIUNIVERSE y conserva:
 - PAPER por defecto
@@ -19,3 +19,8 @@ CORRECCIÓN PRINCIPAL:
 
 NO activar LIVE. Mantener TRADING_MODE=PAPER mientras se verifica que la IA realiza llamadas y genera decisiones.
 Las claves de Binance/OpenAI deben permanecer únicamente como variables de entorno de Railway.
+
+
+FIX V25: define cleanJsonText() before askAI so successful OpenAI responses can be parsed.
+
+The default OpenAI API model is gpt-5.6-luna.
