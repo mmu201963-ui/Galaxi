@@ -1,7 +1,13 @@
 {
-  "name": "galaxi-v24-ai-diagnostic",
-  "version": "24.0.0",
+  "name": "galaxi-v32-behavioral-engine",
+  "version": "32.0.0",
+  "private": true,
   "type": "module",
-  "scripts": {"start":"node server.js"},
-  "dependencies": {"ws":"^8.18.0"}
+  "scripts": {
+    "start": "node index.js",
+    "check": "node --check index.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
 }

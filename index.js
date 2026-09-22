@@ -3,56 +3,81 @@ import crypto from 'node:crypto';
 import WebSocket from 'ws';
 
 /*
-GALAXI V31 CLOSE GUARANTEED
-- Real-time Binance USD-M Futures market data
-- AI decision engine through OpenAI Responses API
-- PAPER by default
-- LIVE only when TRADING_MODE=LIVE and LIVE_ARMED=true
-- AI chooses OPEN_LONG / OPEN_SHORT / CLOSE / HOLD
-- Risk limits remain deterministic and cannot be overridden by the model
+ GALAXI V32 · BEHAVIORAL ENGINE
+
+ Objective:
+ - Scan the complete Binance USDⓈ-M perpetual USDT universe.
+ - Rotate deep analysis across the whole market instead of repeatedly selecting
+   only the largest/most familiar coins.
+ - Combine technical structure + momentum + volume + volatility + OI +
+   Binance Top-Trader aggregated behavior.
+ - Compare current conditions with GALAXI's own closed-trade pattern memory.
+ - Prefer a balanced portfolio: maximum 6 LONG + 6 SHORT, 12 total.
+ - Manage exits deterministically and through the AI.
+ - PAPER is the default. LIVE requires TRADING_MODE=LIVE and LIVE_ARMED=true.
+
+ Important:
+ Binance's "Top Trader" endpoints expose aggregated behavior of the top 20%
+ by margin balance, not identifiable individual wallets. GALAXI therefore
+ treats this as a behavioral market signal, not as wallet-copy trading.
 */
 
 const runtimeFile = 'galaxi-runtime.json';
+const learningFile = 'galaxi-learning.json';
 const controlFile = 'galaxi-control.json';
 
 const cfg = {
   mode: String(process.env.TRADING_MODE || 'PAPER').toUpperCase(),
   liveArmed: String(process.env.LIVE_ARMED || 'false').toLowerCase() === 'true',
+
   openaiKey: process.env.OPENAI_API_KEY || '',
-  openaiModel: process.env.OPENAI_MODEL || 'gpt-5.6-luna',
+  openaiModel: process.env.OPENAI_MODEL || 'gpt-5.6',
+
   binanceKey: process.env.BINANCE_API_KEY || '',
   binanceSecret: process.env.BINANCE_API_SECRET || '',
   binanceBase: process.env.BINANCE_FAPI_BASE || 'https://fapi.binance.com',
   wsUrl: process.env.BINANCE_FUTURES_WS || 'wss://fstream.binance.com/ws/!miniTicker@arr',
 
   capital: Number(process.env.PAPER_START_CAPITAL || 10000),
+
   maxPositions: Math.min(12, Math.max(1, Number(process.env.MAX_POSITIONS || 12))),
+  maxLongPositions: Math.min(6, Math.max(0, Number(process.env.MAX_LONG_POSITIONS || 6))),
+  maxShortPositions: Math.min(6, Math.max(0, Number(process.env.MAX_SHORT_POSITIONS || 6))),
+
   maxTotalMarginPct: Math.min(50, Math.max(1, Number(process.env.MAX_TOTAL_MARGIN_PCT || 30))),
   maxPositionMarginPct: Math.min(5, Math.max(0.25, Number(process.env.MAX_POSITION_MARGIN_PCT || 2))),
   leverage: Math.min(10, Math.max(1, Number(process.env.LEVERAGE || 5))),
 
   scanMs: Math.max(15000, Number(process.env.SCAN_INTERVAL_MS || 20000)),
-  aiTimeoutMs: Math.max(5000, Number(process.env.AI_TIMEOUT_MS || 15000)),
+  aiTimeoutMs: Math.max(5000, Number(process.env.AI_TIMEOUT_MS || 18000)),
+
+  // Full-market discovery happens every cycle from the 24h ticker.
+  // Deep technical analysis rotates through the whole universe.
+  deepScanSymbols: Math.min(60, Math.max(24, Number(process.env.DEEP_SCAN_SYMBOLS || 48))),
   aiTopSymbols: Math.min(30, Math.max(12, Number(process.env.AI_TOP_SYMBOLS || 24))),
-  newListingDays: Math.max(1, Number(process.env.NEW_LISTING_DAYS || 30)),
-  memeSlots: Math.max(2, Number(process.env.MEME_SLOTS || 6)),
-  newSlots: Math.max(2, Number(process.env.NEW_LISTING_SLOTS || 6)),
+  traderTopSymbols: Math.min(48, Math.max(12, Number(process.env.TRADER_TOP_SYMBOLS || 36))),
+  rotationSymbols: Math.min(30, Math.max(8, Number(process.env.ROTATION_SYMBOLS || 18))),
+
   klineLimit: Math.min(150, Math.max(50, Number(process.env.KLINE_LIMIT || 80))),
   marketConcurrency: Math.min(8, Math.max(2, Number(process.env.MARKET_CONCURRENCY || 5))),
+  behaviorConcurrency: Math.min(8, Math.max(2, Number(process.env.BEHAVIOR_CONCURRENCY || 6))),
   restTimeoutMs: Math.max(5000, Number(process.env.REST_TIMEOUT_MS || 12000)),
 
-  // These are risk/execution protections, not opportunity filters.
+  // Expected net edge after estimated round-trip fees.
+  minExpectedNetPct: Math.max(0.02, Number(process.env.MIN_EXPECTED_NET_PCT || 0.08)),
+  estimatedFeeRate: Math.max(0.0001, Number(process.env.ESTIMATED_FEE_RATE || 0.0004)),
+
   maxDailyLossPct: Math.min(20, Math.max(0.5, Number(process.env.MAX_DAILY_LOSS_PCT || 5))),
   maxDrawdownPct: Math.min(30, Math.max(1, Number(process.env.MAX_DRAWDOWN_PCT || 10))),
   minSecondsBetweenOrders: Math.max(2, Number(process.env.MIN_SECONDS_BETWEEN_ORDERS || 5)),
-  maxActionsPerCycle: Math.min(4, Math.max(1, Number(process.env.MAX_ACTIONS_PER_CYCLE || 4))),
-  minExpectedNetPct: Math.max(0.005, Number(process.env.MIN_EXPECTED_NET_PCT || 0.01)),
-  sideBalancePct: 50,
+  maxActionsPerCycle: Math.min(6, Math.max(1, Number(process.env.MAX_ACTIONS_PER_CYCLE || 4))),
 
-  paperTpPct: Number(process.env.PAPER_TP_PCT || 1.2),
-  paperSlPct: Number(process.env.PAPER_SL_PCT || 0.7),
-  paperMaxHoldMs: Number(process.env.PAPER_MAX_HOLD_MS || 1200000),
-  paperMinHoldMs: Number(process.env.PAPER_MIN_HOLD_MS || 15000),
+  paperTpPct: Number(process.env.PAPER_TP_PCT || 0.90),
+  paperSlPct: Number(process.env.PAPER_SL_PCT || 0.65),
+  paperMaxHoldMs: Number(process.env.PAPER_MAX_HOLD_MS || 1200000), // 20 min
+
+  learningMaxTrades: Math.min(2000, Math.max(100, Number(process.env.LEARNING_MAX_TRADES || 500))),
+  learningMinSamples: Math.min(50, Math.max(5, Number(process.env.LEARNING_MIN_SAMPLES || 8)))
 };
 
 const state = {
@@ -61,6 +86,7 @@ const state = {
   ai: true,
   aiModel: cfg.openaiModel,
   liveArmed: cfg.liveArmed,
+
   equity: cfg.capital,
   initialCapital: cfg.capital,
   realizedPnl: 0,
@@ -70,46 +96,56 @@ const state = {
   dailyLossPct: 0,
 
   symbols: 0,
+  deepScanned: 0,
   warmSymbols: 0,
   cycle: 0,
   wsConnected: 0,
-  wsExpected: 1,
   candidates: 0,
   riskApproved: 0,
-  portfolioCount: 0,
 
   regime: 'MIXTO',
-  timeframes: { '20s': '—', '1m': '—', '3m': '—', '5m': '—' },
   longPct: 50,
   shortPct: 50,
+  longOpen: 0,
+  shortOpen: 0,
+
+  behaviorCoverage: 0,
+  behaviorBias: 'MIXTO',
+  behaviorConfidence: 0,
 
   positions: [],
   ranking: [],
   history: [],
-  news: [],
+  learning: {
+    trades: 0,
+    wins: 0,
+    losses: 0,
+    winRate: 0,
+    avgNetPct: 0,
+    edgePatterns: 0
+  },
 
   lastSignal: 'Esperando datos para el cerebro IA…',
   lastError: null,
   aiDecision: null,
   aiReasoning: '',
+
   aiCalls: 0,
-  aiAttempts: 0,
-  aiSuccess: 0,
   aiErrors: 0,
-  aiReady: false,
-  aiStatus: 'INICIANDO',
-  aiLastError: null,
-  aiLastCallAt: null,
-  aiLatencyMs: 0,
   restCalls: 0,
   rate429: 0,
   rate418: 0,
+
   lastUpdate: null
 };
 
 const ticks = new Map();
 const cooldown = new Map();
 const marketInfo = new Map();
+const behaviorCache = new Map();
+const openInterestCache = new Map();
+
+let learningTrades = [];
 let ws = null;
 let stopped = false;
 let reconnectTimer = null;
@@ -117,59 +153,54 @@ let loopBusy = false;
 let lastOrderTs = 0;
 let serverOffset = 0;
 let lastAccount = null;
+let rotationCursor = 0;
 
 function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function now() { return Date.now(); }
+
 function round(n, d = 6) {
   const p = 10 ** d;
   return Math.round(Number(n) * p) / p;
 }
 
-// OpenAI Responses can return JSON either as plain text or wrapped in a
-// markdown code fence. Normalize only the transport wrapper; never alter the
-// JSON content itself. This helper is intentionally local to the engine so a
-// malformed model response is reported as a JSON error rather than a missing
-// function error.
-function riskAllowsOpen(symbol, margin) {
-  if (stopped) return { ok: false, reason: 'STOP' };
-  if (state.positions.length >= cfg.maxPositions) return { ok: false, reason: 'MAX_POSITIONS' };
-  const totalMargin = state.positions.reduce((sum, pos) => sum + Number(pos.margin || 0), 0);
-  const maxTotal = state.equity * cfg.maxTotalMarginPct / 100;
-  if (totalMargin + margin > maxTotal) return { ok: false, reason: 'MAX_TOTAL_MARGIN' };
-  const dailyLoss = Math.max(0, -state.dailyLossPct);
-  if (dailyLoss >= cfg.maxDailyLossPct) return { ok: false, reason: 'DAILY_LOSS' };
-  if (state.drawdownPct >= cfg.maxDrawdownPct) return { ok: false, reason: 'MAX_DRAWDOWN' };
-  const cd = cooldown.get(symbol) || 0;
-  if (cd > now()) return { ok: false, reason: 'COOLDOWN' };
-  return { ok: true };
+function avg(arr) {
+  const a = arr.filter(Number.isFinite);
+  return a.length ? a.reduce((s, n) => s + n, 0) / a.length : 0;
 }
 
-function marginFor() {
-  const equity = Math.max(0, Number(state.equity || cfg.capital));
-  const byPosition = equity * cfg.maxPositionMarginPct / 100;
-  const totalMax = equity * cfg.maxTotalMarginPct / 100;
-  const used = state.positions.reduce((sum, pos) => sum + Number(pos.margin || 0), 0);
-  return Math.max(0, Math.min(byPosition, totalMax - used));
+function pctMove(current, previous) {
+  return previous > 0 ? (current / previous - 1) * 100 : 0;
 }
 
-function cleanJsonText(value) {
-  let s = String(value ?? '').trim();
-  if (!s) return s;
+function precisionFromStep(step) {
+  const s = String(step);
+  if (!s.includes('.')) return 0;
+  return Math.max(0, s.split('.')[1].replace(/0+$/, '').length);
+}
 
-  if (s.startsWith('```')) {
-    s = s.replace(/^```(?:json)?\s*/i, '');
-    s = s.replace(/\s*```$/i, '');
-  }
+function normalizeQty(symbol, qty) {
+  const m = marketInfo.get(symbol);
+  if (!m) return 0;
+  const step = m.qtyStep;
+  const p = precisionFromStep(step);
+  return round(Math.floor(Number(qty) / step) * step, p);
+}
 
-  const first = s.indexOf('{');
-  const last = s.lastIndexOf('}');
-  if (first >= 0 && last > first) s = s.slice(first, last + 1);
-  return s.trim();
+function normalizePrice(symbol, price) {
+  const m = marketInfo.get(symbol);
+  if (!m) return Number(price);
+  const step = m.tickSize;
+  return round(Math.round(Number(price) / step) * step, precisionFromStep(step));
+}
+
+function safeJson(value) {
+  try { return JSON.stringify(value); } catch { return '{}'; }
 }
 
 function writeState() {
-  state.portfolioCount = state.positions.length;
+  state.longOpen = state.positions.filter(p => p.side === 'LONG').length;
+  state.shortOpen = state.positions.filter(p => p.side === 'SHORT').length;
   state.unrealizedPnl = state.positions.reduce((s, p) => s + Number(p.pnl || 0), 0);
 
   if (cfg.mode === 'PAPER') {
@@ -181,33 +212,36 @@ function writeState() {
   state.dailyLossPct = Math.min(0, state.realizedPnl / cfg.capital * 100);
   state.lastUpdate = new Date().toISOString();
 
-  fs.writeFileSync(runtimeFile, JSON.stringify(state, null, 2));
+  state.learning = learningSummary();
+  try {
+    fs.writeFileSync(runtimeFile, JSON.stringify(state, null, 2));
+  } catch {}
 }
 
 function pushHistory(item) {
   state.history.unshift({ time: new Date().toISOString(), ...item });
-  state.history = state.history.slice(0, 100);
+  state.history = state.history.slice(0, 150);
 }
 
 async function rest(path, options = {}, signed = false) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), cfg.restTimeoutMs);
+
   const method = options.method || 'GET';
-  let params = { ...(options.params || {}) };
+  const params = { ...(options.params || {}) };
 
   if (signed) {
     params.timestamp = Date.now() + serverOffset;
     params.recvWindow = 5000;
   }
 
-  let query = new URLSearchParams();
+  const query = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null) query.set(k, String(v));
   }
 
   if (signed) {
-    const signature = crypto
-      .createHmac('sha256', cfg.binanceSecret)
+    const signature = crypto.createHmac('sha256', cfg.binanceSecret)
       .update(query.toString())
       .digest('hex');
     query.set('signature', signature);
@@ -219,6 +253,7 @@ async function rest(path, options = {}, signed = false) {
   if (method !== 'GET') headers['Content-Type'] = 'application/x-www-form-urlencoded';
 
   state.restCalls++;
+
   let res;
   let text;
   try {
@@ -243,9 +278,9 @@ async function rest(path, options = {}, signed = false) {
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
 
   if (!res.ok) {
-    const msg = data?.msg || `HTTP ${res.status}`;
-    throw new Error(`BINANCE ${res.status}: ${msg}`);
+    throw new Error(`BINANCE ${res.status}: ${data?.msg || `HTTP ${res.status}`}`);
   }
+
   return data;
 }
 
@@ -258,97 +293,125 @@ async function syncServerTime() {
   }
 }
 
+function classifyMarket(baseAsset, onboardDate) {
+  const b = String(baseAsset || '').toUpperCase();
+  const ageDays = onboardDate ? (Date.now() - Number(onboardDate)) / 86400000 : 9999;
+
+  const memeHints =
+    /(DOGE|SHIB|PEPE|FLOKI|BONK|WIF|MEME|BOME|MEW|MOG|BRETT|TURBO|NEIRO|DOGS|PNUT|POPCAT|SATS|RATS|CHEEMS|MOODENG|GOAT|PENGU|TRUMP|MELANIA|TOSHI)/i;
+
+  const meme = memeHints.test(b);
+  const fresh = ageDays >= 0 && ageDays <= 30;
+
+  if (fresh && meme) return 'NEW_MEME';
+  if (fresh) return 'NEW';
+  if (meme) return 'MEME';
+  return 'NORMAL';
+}
+
 async function loadExchangeInfo() {
   const data = await rest('/fapi/v1/exchangeInfo');
   marketInfo.clear();
 
   for (const s of data.symbols || []) {
-    if (s.status !== 'TRADING' || s.quoteAsset !== 'USDT' || s.contractType !== 'PERPETUAL') continue;
+    if (
+      s.status !== 'TRADING' ||
+      s.quoteAsset !== 'USDT' ||
+      s.contractType !== 'PERPETUAL'
+    ) continue;
 
     const lot = (s.filters || []).find(x => x.filterType === 'LOT_SIZE');
     const price = (s.filters || []).find(x => x.filterType === 'PRICE_FILTER');
+
     marketInfo.set(s.symbol, {
-      baseAsset: s.baseAsset || s.symbol.replace(/USDT$/, ''),
+      baseAsset: s.baseAsset,
       onboardDate: Number(s.onboardDate || 0),
+      category: classifyMarket(s.baseAsset, s.onboardDate),
       qtyStep: Number(lot?.stepSize || 0.001),
       minQty: Number(lot?.minQty || 0),
       tickSize: Number(price?.tickSize || 0.00001)
     });
   }
+
   state.symbols = marketInfo.size;
 }
 
+async function fetch24hr() {
+  const data = await rest('/fapi/v1/ticker/24hr');
+  let n = 0;
 
-const MEME_ASSETS = new Set([
-  'DOGE','SHIB','PEPE','FLOKI','BONK','WIF','MEME','BOME','MEW','MOG','BRETT','TURBO',
-  'NEIRO','NEIROETH','DOGS','PNUT','ACT','POPCAT','1000SATS','1000RATS','1000BONK','1000FLOKI',
-  '1000PEPE','1000SHIB','1000CHEEMS','MOODENG','GOAT','PENGU','SPX','TRUMP','MELANIA','TOSHI'
-]);
-const MEME_HINTS = /(DOGE|SHIB|PEPE|FLOKI|BONK|WIF|MEME|BOME|MEW|MOG|BRETT|TURBO|NEIRO|DOGS|PNUT|POPCAT|SATS|RATS|CHEEMS|MOODENG|GOAT|PENGU|TRUMP|MELANIA|TOSHI)/i;
+  for (const t of data || []) {
+    if (!marketInfo.has(t.symbol)) continue;
 
-function marketCategory(symbol) {
-  const m = marketInfo.get(symbol) || {};
-  const base = String(m.baseAsset || symbol.replace(/USDT$/, '')).toUpperCase();
-  const meme = MEME_ASSETS.has(base) || MEME_HINTS.test(base);
-  const ageMs = m.onboardDate > 0 ? now() - m.onboardDate : Infinity;
-  const isNew = ageMs >= 0 && ageMs <= cfg.newListingDays * 86400000;
-  if (meme && isNew) return 'NEW_MEME';
-  if (meme) return 'MEME';
-  if (isNew) return 'NEW';
-  return 'NORMAL';
+    const price = Number(t.lastPrice);
+    const quoteVolume = Number(t.quoteVolume || 0);
+    const changePct = Number(t.priceChangePercent || 0);
+
+    if (!(price > 0)) continue;
+
+    ticks.set(t.symbol, {
+      price,
+      volume: quoteVolume,
+      changePct,
+      high24h: Number(t.highPrice || 0),
+      low24h: Number(t.lowPrice || 0),
+      ts: now()
+    });
+    n++;
+  }
+
+  return n;
 }
 
-function selectAICandidates() {
-  const all = [...ticks.entries()]
-    .filter(([s,t]) => marketInfo.has(s) && Number(t.price) > 0)
-    .map(([symbol,t]) => ({ symbol, t, category: marketCategory(symbol) }))
-    .sort((a,b) => Number(b.t.volume || 0) - Number(a.t.volume || 0));
+function discoveryScore(symbol) {
+  const t = ticks.get(symbol);
+  const m = marketInfo.get(symbol);
+  if (!t || !m) return -Infinity;
 
-  const memes = all.filter(x => x.category === 'MEME' || x.category === 'NEW_MEME');
-  const fresh = all.filter(x => x.category === 'NEW' || x.category === 'NEW_MEME');
-  const normal = all.filter(x => x.category === 'NORMAL');
-  const selected = [];
-  const used = new Set();
-  const take = (arr, n) => {
-    for (const x of arr) {
-      if (selected.length >= cfg.aiTopSymbols || n <= 0) break;
-      if (used.has(x.symbol)) continue;
-      selected.push(x); used.add(x.symbol); n--;
+  // Percentage movement is deliberately used instead of absolute price,
+  // avoiding the old bias where expensive/large coins dominated selection.
+  const move = Math.abs(Number(t.changePct || 0));
+  const range = t.low24h > 0 ? Math.abs(t.high24h / t.low24h - 1) * 100 : 0;
+  const liquidity = Math.log10(1 + Math.max(0, Number(t.volume || 0)));
+
+  let categoryBonus = 0;
+  if (m.category === 'NEW' || m.category === 'NEW_MEME') categoryBonus += 0.8;
+  if (m.category === 'MEME' || m.category === 'NEW_MEME') categoryBonus += 0.4;
+
+  return move * 1.4 + range * 0.7 + liquidity * 0.08 + categoryBonus;
+}
+
+function selectDeepUniverse() {
+  const all = [...marketInfo.keys()];
+
+  const ranked = all
+    .map(symbol => ({ symbol, score: discoveryScore(symbol) }))
+    .filter(x => Number.isFinite(x.score))
+    .sort((a, b) => b.score - a.score)
+    .map(x => x.symbol);
+
+  const movers = ranked.slice(0, Math.max(12, cfg.deepScanSymbols - cfg.rotationSymbols));
+
+  // Rotation prevents the same 20-30 familiar symbols from monopolizing the AI.
+  const remaining = ranked.filter(s => !movers.includes(s));
+  const rotN = Math.min(cfg.rotationSymbols, remaining.length);
+
+  if (rotN > 0) {
+    const start = rotationCursor % remaining.length;
+    for (let i = 0; i < rotN; i++) {
+      const s = remaining[(start + i) % remaining.length];
+      if (!movers.includes(s)) movers.push(s);
     }
-  };
-  take(memes, cfg.memeSlots);
-  take(fresh, cfg.newSlots);
-  take(normal, cfg.aiTopSymbols);
-  take(all, cfg.aiTopSymbols);
-  return selected.slice(0, cfg.aiTopSymbols).map(x => [x.symbol, x.t]);
-}
+    rotationCursor = (rotationCursor + rotN) % Math.max(1, remaining.length);
+  }
 
-function precisionFromStep(step) {
-  const s = String(step);
-  if (!s.includes('.')) return 0;
-  return Math.max(0, s.split('.')[1].replace(/0+$/, '').length);
-}
+  // If the market is small, fill from all.
+  for (const s of ranked) {
+    if (movers.length >= cfg.deepScanSymbols) break;
+    if (!movers.includes(s)) movers.push(s);
+  }
 
-function normalizeQty(symbol, qty) {
-  const m = marketInfo.get(symbol);
-  if (!m) return 0;
-  const step = m.qtyStep;
-  const p = precisionFromStep(step);
-  const q = Math.floor(Number(qty) / step) * step;
-  return round(q, p);
-}
-
-function normalizePrice(symbol, price) {
-  const m = marketInfo.get(symbol);
-  if (!m) return Number(price);
-  const step = m.tickSize;
-  const p = precisionFromStep(step);
-  const q = Math.round(Number(price) / step) * step;
-  return round(q, p);
-}
-
-function pctMove(a, b) {
-  return b > 0 ? (a / b - 1) * 100 : 0;
+  return movers.slice(0, cfg.deepScanSymbols);
 }
 
 function ema(values, period) {
@@ -361,17 +424,23 @@ function ema(values, period) {
 
 function rsi(values, period = 14) {
   if (values.length <= period) return 50;
+
   let gain = 0, loss = 0;
   for (let i = 1; i <= period; i++) {
     const d = values[i] - values[i - 1];
-    if (d >= 0) gain += d; else loss -= d;
+    if (d >= 0) gain += d;
+    else loss -= d;
   }
-  let ag = gain / period, al = loss / period;
+
+  let ag = gain / period;
+  let al = loss / period;
+
   for (let i = period + 1; i < values.length; i++) {
     const d = values[i] - values[i - 1];
     ag = ((ag * (period - 1)) + Math.max(d, 0)) / period;
     al = ((al * (period - 1)) + Math.max(-d, 0)) / period;
   }
+
   if (al === 0) return 100;
   return 100 - 100 / (1 + ag / al);
 }
@@ -379,18 +448,37 @@ function rsi(values, period = 14) {
 function atr(klines, period = 14) {
   if (klines.length < period + 2) return 0;
   const trs = [];
+
   for (let i = 1; i < klines.length; i++) {
-    const h = Number(klines[i][2]), l = Number(klines[i][3]), pc = Number(klines[i - 1][4]);
+    const h = Number(klines[i][2]);
+    const l = Number(klines[i][3]);
+    const pc = Number(klines[i - 1][4]);
     trs.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
   }
-  const recent = trs.slice(-period);
-  return recent.reduce((a, b) => a + b, 0) / recent.length;
+
+  return avg(trs.slice(-period));
 }
 
-async function fetchKlines(symbol, interval = '1m', limit = cfg.klineLimit) {
-  return rest('/fapi/v1/klines', {
-    params: { symbol, interval, limit }
-  });
+async function fetchKlines(symbol, interval, limit) {
+  return rest('/fapi/v1/klines', { params: { symbol, interval, limit } });
+}
+
+async function fetchOpenInterest(symbol) {
+  try {
+    const [current, hist] = await Promise.all([
+      rest('/fapi/v1/openInterest', { params: { symbol } }),
+      rest('/futures/data/openInterestHist', { params: { symbol, period: '5m', limit: 2 } })
+    ]);
+    const oi = Number(current?.openInterest || 0);
+    const rows = Array.isArray(hist) ? hist : [];
+    const prev = Number(rows.at(-2)?.sumOpenInterest || 0);
+    const changePct = prev > 0 ? (oi / prev - 1) * 100 : 0;
+    openInterestCache.set(symbol, oi);
+    return { value: oi, changePct: round(changePct, 3) };
+  } catch {
+    const cached = openInterestCache.get(symbol);
+    return { value: cached || 0, changePct: 0 };
+  }
 }
 
 function analyzeKlines(symbol, k1, k5) {
@@ -400,13 +488,14 @@ function analyzeKlines(symbol, k1, k5) {
   const volumes1 = k1.map(x => Number(x[5]));
 
   const price = closes1.at(-1) || Number(ticks.get(symbol)?.price || 0);
-  const e9 = ema(closes1.slice(-40), 9);
+  const e9 = ema(closes1.slice(-45), 9);
   const e21 = ema(closes1.slice(-60), 21);
   const e50 = ema(closes1.slice(-70), 50);
   const r = rsi(closes1, 14);
   const a = atr(k1, 14);
-  const volNow = volumes1.slice(-10).reduce((x, y) => x + y, 0) / 10;
-  const volPrev = volumes1.slice(-30, -10).reduce((x, y) => x + y, 0) / 20 || volNow;
+
+  const volNow = avg(volumes1.slice(-8));
+  const volPrev = avg(volumes1.slice(-28, -8)) || volNow;
   const volumeRatio = volPrev ? volNow / volPrev : 1;
 
   const m1 = pctMove(price, closes1.at(-2));
@@ -421,149 +510,442 @@ function analyzeKlines(symbol, k1, k5) {
 
   const recentHigh = Math.max(...highs1.slice(-20));
   const recentLow = Math.min(...lows1.slice(-20));
-  const breakoutUp = price > recentHigh * 0.9995;
-  const breakoutDown = price < recentLow * 1.0005;
 
-  let bias = 'NEUTRAL';
-  const bull = e9 > e21 && e21 > e50 && m5 > 0 && m15 > 0 && e20_5 >= e50_5;
-  const bear = e9 < e21 && e21 < e50 && m5 < 0 && m15 < 0 && e20_5 <= e50_5;
-  if (bull) bias = 'LONG';
-  if (bear) bias = 'SHORT';
+  const bull =
+    e9 > e21 &&
+    e21 > e50 &&
+    m5 > 0 &&
+    m15 > 0 &&
+    e20_5 >= e50_5;
+
+  const bear =
+    e9 < e21 &&
+    e21 < e50 &&
+    m5 < 0 &&
+    m15 < 0 &&
+    e20_5 <= e50_5;
 
   return {
-    symbol, price,
-    bias,
+    symbol,
+    price,
+    bias: bull ? 'LONG' : bear ? 'SHORT' : 'NEUTRAL',
     rsi: round(r, 2),
     atrPct: price ? round(a / price * 100, 4) : 0,
     volumeRatio: round(volumeRatio, 2),
+
     momentum1m: round(m1, 3),
     momentum5m: round(m5, 3),
     momentum15m: round(m15, 3),
     momentum30m: round(m30, 3),
     momentum5mTF: round(m5tf, 3),
+
     ema9: round(e9, 8),
     ema21: round(e21, 8),
     ema50: round(e50, 8),
     ema20_5m: round(e20_5, 8),
     ema50_5m: round(e50_5, 8),
-    breakoutUp,
-    breakoutDown,
+
+    breakoutUp: price > recentHigh * 0.9995,
+    breakoutDown: price < recentLow * 1.0005,
     high20: recentHigh,
-    low20: recentLow
+    low20: recentLow,
+
+    quoteVolume24h: round(Number(ticks.get(symbol)?.volume || 0), 0),
+    change24h: round(Number(ticks.get(symbol)?.changePct || 0), 3),
+    category: marketInfo.get(symbol)?.category || 'NORMAL'
   };
 }
 
-async function seedTicksFromRest() {
-  // WebSocket is the preferred live feed, but a connected socket can still
-  // deliver no usable ticker rows for a short period. Seed prices/volume from
-  // Binance REST so the analysis engine cannot remain stuck at "analizados 0".
-  const data = await rest('/fapi/v1/ticker/24hr');
-  let seeded = 0;
-  for (const t of data || []) {
-    const symbol = t.symbol;
-    if (!symbol || !marketInfo.has(symbol)) continue;
-    const price = Number(t.lastPrice);
-    const volume = Number(t.quoteVolume || 0);
-    if (price > 0) {
-      ticks.set(symbol, { price, volume, ts: now() });
-      seeded++;
-    }
-  }
-  return seeded;
+function behaviorSide(accountRows, positionRows) {
+  const a = avg(accountRows.map(x => Number(x.longShortRatio)));
+  const p = avg(positionRows.map(x => Number(x.longShortRatio)));
+
+  if (a >= 1.12 && p >= 1.12) return 'LONG';
+  if (a <= 0.89 && p <= 0.89) return 'SHORT';
+  return 'MIXTO';
 }
 
+function behaviorConsistency(rows) {
+  if (!rows.length) return 0;
+  const signs = rows.map(x => Number(x.longShortRatio) >= 1 ? 1 : -1);
+  const mean = avg(signs);
+  return Math.abs(mean);
+}
 
-async function refreshPaperPrices() {
-  // PAPER must use a fresh mark price on every cycle. The WS is useful for
-  // streaming, but the REST snapshot prevents a stale tick from freezing
-  // current/PnL and therefore preventing TP/SL closes.
-  const data = await rest('/fapi/v1/ticker/price');
-  const ts = now();
-  let refreshed = 0;
-  for (const t of data || []) {
-    const symbol = t.symbol;
-    if (!symbol || !marketInfo.has(symbol)) continue;
-    const price = Number(t.price);
-    if (price > 0) {
-      const old = ticks.get(symbol);
-      ticks.set(symbol, { price, volume: Number(old?.volume || 0), ts });
-      refreshed++;
-    }
+async function fetchTopTraderBehavior(symbol) {
+  const cached = behaviorCache.get(symbol);
+  if (cached && now() - cached.ts < 60000) return cached;
+
+  const params = { symbol, period: '5m', limit: 6 };
+
+  try {
+    const [accounts, positions] = await Promise.all([
+      rest('/futures/data/topLongShortAccountRatio', { params }),
+      rest('/futures/data/topLongShortPositionRatio', { params })
+    ]);
+
+    const accountRows = Array.isArray(accounts) ? accounts : [];
+    const positionRows = Array.isArray(positions) ? positions : [];
+
+    const latestA = Number(accountRows.at(-1)?.longShortRatio || 1);
+    const latestP = Number(positionRows.at(-1)?.longShortRatio || 1);
+
+    const side = behaviorSide(accountRows, positionRows);
+    const consistency = avg([
+      behaviorConsistency(accountRows),
+      behaviorConsistency(positionRows)
+    ]);
+
+    const previousA = Number(accountRows.at(-2)?.longShortRatio || latestA);
+    const delta = latestA - previousA;
+
+    const result = {
+      accountRatio: round(latestA, 4),
+      positionRatio: round(latestP, 4),
+      accountLongPct: round(Number(accountRows.at(-1)?.longAccount || 0) * 100, 2),
+      accountShortPct: round(Number(accountRows.at(-1)?.shortAccount || 0) * 100, 2),
+      positionLongPct: round(Number(positionRows.at(-1)?.longAccount || 0) * 100, 2),
+      positionShortPct: round(Number(positionRows.at(-1)?.shortAccount || 0) * 100, 2),
+      delta5m: round(delta, 4),
+      side,
+      consistency: round(consistency, 3),
+      samples: Math.max(accountRows.length, positionRows.length),
+      ts: now()
+    };
+
+    behaviorCache.set(symbol, result);
+    return result;
+  } catch (e) {
+    return cached || {
+      accountRatio: 1,
+      positionRatio: 1,
+      accountLongPct: 50,
+      accountShortPct: 50,
+      positionLongPct: 50,
+      positionShortPct: 50,
+      delta5m: 0,
+      side: 'MIXTO',
+      consistency: 0,
+      samples: 0,
+      ts: now(),
+      error: e.message
+    };
   }
-  state.paperPriceRefresh = refreshed;
-  return refreshed;
+}
+
+async function mapLimit(items, limit, worker) {
+  const out = [];
+  for (let i = 0; i < items.length; i += limit) {
+    const batch = items.slice(i, i + limit);
+    const results = await Promise.all(batch.map(worker));
+    out.push(...results);
+  }
+  return out;
 }
 
 async function buildMarketSnapshot() {
-  let candidates = selectAICandidates();
+  await fetch24hr();
 
-  if (candidates.length < Math.min(8, cfg.aiTopSymbols)) {
+  const deepSymbols = selectDeepUniverse();
+  state.deepScanned = deepSymbols.length;
+
+  const technicals = [];
+  const results = await mapLimit(deepSymbols, cfg.marketConcurrency, async symbol => {
     try {
-      const seeded = await seedTicksFromRest();
-      if (seeded) {
-        candidates = selectAICandidates();
-        console.log(`TICKER_REST_SEED=${seeded}`);
-      }
-    } catch (e) {
-      state.lastError = `Ticker REST: ${e.message}`;
-    }
-  }
+      const [k1, k5] = await Promise.all([
+        fetchKlines(symbol, '1m', cfg.klineLimit),
+        fetchKlines(symbol, '5m', 70)
+      ]);
 
-  const rows = [];
-  let errors = 0;
-  const errorSamples = [];
-  for (let i = 0; i < candidates.length; i += cfg.marketConcurrency) {
-    const batch = candidates.slice(i, i + cfg.marketConcurrency);
-    const results = await Promise.all(batch.map(async ([symbol]) => {
-      try {
-        const [k1, k5] = await Promise.all([fetchKlines(symbol, '1m'), fetchKlines(symbol, '5m', 70)]);
-        if (!Array.isArray(k1) || k1.length < 35 || !Array.isArray(k5) || k5.length < 20) {
-          throw new Error(`KLINE_INSUFFICIENT ${symbol} k1=${k1?.length || 0} k5=${k5?.length || 0}`);
-        }
-        const a = analyzeKlines(symbol, k1, k5);
-        return { ...a, category: marketCategory(symbol), quoteVolume24h: round(Number(ticks.get(symbol)?.volume || 0), 0) };
-      } catch (e) {
-        errors++;
-        if (errorSamples.length < 3) errorSamples.push(`${symbol}: ${e.message}`);
+      if (!Array.isArray(k1) || k1.length < 35 || !Array.isArray(k5) || k5.length < 20) {
         return null;
       }
-    }));
-    for (const r of results) if (r) rows.push(r);
-  }
 
-  if (errors && !rows.length) state.lastError = `Mercado: 0/${candidates.length} analizados · ${errorSamples.join(' | ')}`;
-  else if (errors) state.lastError = `Mercado: ${rows.length}/${candidates.length} analizados · fallos=${errors}`;
-  else state.lastError = null;
-
-  rows.sort((a,b) => {
-    const aScore = Math.max(Math.abs(a.momentum5m), Math.abs(a.momentum15m), Math.abs(a.momentum30m)) * (1 + Math.min(3, a.volumeRatio || 1) * 0.15);
-    const bScore = Math.max(Math.abs(b.momentum5m), Math.abs(b.momentum15m), Math.abs(b.momentum30m)) * (1 + Math.min(3, b.volumeRatio || 1) * 0.15);
-    return bScore - aScore;
+      return analyzeKlines(symbol, k1, k5);
+    } catch {
+      return null;
+    }
   });
 
-  state.warmSymbols = rows.length;
-  state.ranking = rows.slice(0, Math.min(30, rows.length));
-  return rows;
+  for (const r of results) if (r) technicals.push(r);
+
+  technicals.sort((a, b) => {
+    const sa = Math.max(Math.abs(a.momentum5m), Math.abs(a.momentum15m), Math.abs(a.change24h) * 0.15);
+    const sb = Math.max(Math.abs(b.momentum5m), Math.abs(b.momentum15m), Math.abs(b.change24h) * 0.15);
+    return sb - sa;
+  });
+
+  state.warmSymbols = technicals.length;
+
+  // First layer: technical discovery. Then behavior/OI is applied to the
+  // entire deep universe, so the behavioral layer can promote a less-famous
+  // coin into the AI shortlist instead of being calculated only after the
+  // shortlist has already been decided.
+  const behaviorUniverse = technicals.slice(0, Math.min(cfg.traderTopSymbols, technicals.length));
+
+  const enrichedAll = await mapLimit(behaviorUniverse, cfg.behaviorConcurrency, async row => {
+    const [behavior, oi] = await Promise.all([
+      fetchTopTraderBehavior(row.symbol),
+      fetchOpenInterest(row.symbol)
+    ]);
+
+    return {
+      ...row,
+      behavior,
+      openInterest: oi.value,
+      openInterestChangePct: oi.changePct
+    };
+  });
+
+  // Rank after behavior/OI enrichment, not before it.
+  enrichedAll.sort((a, b) => {
+    const sideScore = x => {
+      const tech = Math.max(Math.abs(x.momentum5m), Math.abs(x.momentum15m));
+      const trader = Math.abs(Number(x.behavior?.accountRatio || 1) - 1);
+      const consistency = Number(x.behavior?.consistency || 0);
+      const volume = Math.min(3, Number(x.volumeRatio || 1));
+      return tech * 1.2 + trader * 0.5 + consistency * 0.25 + Math.max(0, volume - 1) * 0.1;
+    };
+    return sideScore(b) - sideScore(a);
+  });
+
+  const enriched = enrichedAll.slice(0, Math.min(cfg.aiTopSymbols, enrichedAll.length));
+  state.candidates = enriched.length;
+  state.ranking = enriched.slice(0, 20);
+
+  const longN = enriched.filter(x => x.bias === 'LONG').length;
+  const shortN = enriched.filter(x => x.bias === 'SHORT').length;
+
+  state.longPct = enriched.length ? Math.round(longN / enriched.length * 100) : 50;
+  state.shortPct = 100 - state.longPct;
+
+  const avg15 = avg(enriched.map(x => Number(x.momentum15m || 0)));
+  const avgTrader = avg(enriched.map(x => Number(x.behavior?.accountRatio || 1)));
+
+  state.behaviorBias =
+    avgTrader >= 1.10 ? 'LONG' :
+    avgTrader <= 0.90 ? 'SHORT' :
+    'MIXTO';
+
+  state.behaviorConfidence = Math.round(
+    avg(enriched.map(x => Number(x.behavior?.consistency || 0))) * 100
+  );
+
+  state.behaviorCoverage = enriched.length
+    ? Math.round(enriched.filter(x => Number(x.behavior?.samples || 0) > 0).length / enriched.length * 100)
+    : 0;
+
+  state.regime =
+    state.longPct >= 62 && avg15 > 0 ? 'ALCISTA' :
+    state.shortPct >= 62 && avg15 < 0 ? 'BAJISTA' :
+    'MIXTO';
+
+  return enriched;
+}
+
+function loadLearning() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(learningFile, 'utf8'));
+    learningTrades = Array.isArray(raw?.trades) ? raw.trades.slice(-cfg.learningMaxTrades) : [];
+  } catch {
+    learningTrades = [];
+  }
+}
+
+function saveLearning() {
+  try {
+    fs.writeFileSync(
+      learningFile,
+      JSON.stringify({
+        version: 1,
+        updatedAt: new Date().toISOString(),
+        trades: learningTrades.slice(-cfg.learningMaxTrades)
+      }, null, 2)
+    );
+  } catch {}
+}
+
+function patternKey(features) {
+  return [
+    features.side || 'NA',
+    features.bias || 'NEUTRAL',
+    features.behaviorSide || 'MIXTO',
+    features.regime || 'MIXTO',
+    features.volBucket || 'NORMAL',
+    features.category || 'NORMAL'
+  ].join('|');
+}
+
+function learningSummary() {
+  const trades = learningTrades.length;
+  if (!trades) {
+    return { trades: 0, wins: 0, losses: 0, winRate: 0, avgNetPct: 0, edgePatterns: 0 };
+  }
+
+  const wins = learningTrades.filter(t => Number(t.netPnlPct) > 0).length;
+  const avgNetPct = avg(learningTrades.map(t => Number(t.netPnlPct || 0)));
+
+  const map = new Map();
+  for (const t of learningTrades) {
+    const key = t.patternKey || 'UNKNOWN';
+    const arr = map.get(key) || [];
+    arr.push(Number(t.netPnlPct || 0));
+    map.set(key, arr);
+  }
+
+  let edgePatterns = 0;
+  for (const arr of map.values()) {
+    if (arr.length >= cfg.learningMinSamples && avg(arr) > 0) edgePatterns++;
+  }
+
+  return {
+    trades,
+    wins,
+    losses: trades - wins,
+    winRate: round(wins / trades * 100, 2),
+    avgNetPct: round(avgNetPct, 4),
+    edgePatterns
+  };
+}
+
+function learnedEdge(features) {
+  const key = patternKey(features);
+  const arr = learningTrades
+    .filter(t => t.patternKey === key)
+    .map(t => Number(t.netPnlPct || 0));
+
+  if (arr.length < cfg.learningMinSamples) return {
+    samples: arr.length,
+    avgNetPct: 0,
+    winRate: 0,
+    usable: false
+  };
+
+  const wins = arr.filter(x => x > 0).length;
+  return {
+    samples: arr.length,
+    avgNetPct: round(avg(arr), 4),
+    winRate: round(wins / arr.length * 100, 2),
+    usable: true
+  };
+}
+
+function learnFromTrade(position, exitReason) {
+  const entry = Number(position.entry || 0);
+  const pnl = Number(position.pnl || 0);
+  const fees = Number(position.fees || 0);
+  const notional = Math.max(0.0000001, Number(position.entryNotional || 0));
+
+  const grossPct = notional ? pnl / notional * 100 : 0;
+  const netPnl = pnl - fees;
+  const netPct = notional ? netPnl / notional * 100 : 0;
+
+  const features = {
+    side: position.side,
+    bias: position.features?.bias || 'NEUTRAL',
+    behaviorSide: position.features?.behaviorSide || 'MIXTO',
+    regime: position.features?.regime || 'MIXTO',
+    volBucket: position.features?.volBucket || 'NORMAL',
+    category: position.features?.category || 'NORMAL'
+  };
+
+  learningTrades.push({
+    ts: new Date().toISOString(),
+    symbol: position.symbol,
+    side: position.side,
+    holdSec: Math.max(0, Math.round((now() - Number(position.openedTs || now())) / 1000)),
+    grossPnl: round(pnl, 6),
+    fees: round(fees, 6),
+    netPnl: round(netPnl, 6),
+    grossPnlPct: round(grossPct, 5),
+    netPnlPct: round(netPct, 5),
+    exitReason,
+    patternKey: patternKey(features),
+    features
+  });
+
+  if (learningTrades.length > cfg.learningMaxTrades) {
+    learningTrades = learningTrades.slice(-cfg.learningMaxTrades);
+  }
+
+  saveLearning();
+}
+
+function riskAllowsOpen(symbol, margin, side) {
+  if (stopped) return { ok: false, reason: 'STOP' };
+  if (state.positions.length >= cfg.maxPositions) return { ok: false, reason: 'MAX_POSITIONS' };
+
+  const longs = state.positions.filter(p => p.side === 'LONG').length;
+  const shorts = state.positions.filter(p => p.side === 'SHORT').length;
+
+  // 50/50 target expressed as hard per-side capacity, without forcing a trade
+  // when there is no positive expected edge.
+  if (side === 'LONG' && longs >= cfg.maxLongPositions) {
+    return { ok: false, reason: 'LONG_QUOTA_FULL' };
+  }
+  if (side === 'SHORT' && shorts >= cfg.maxShortPositions) {
+    return { ok: false, reason: 'SHORT_QUOTA_FULL' };
+  }
+
+  const totalMargin = state.positions.reduce((s, p) => s + Number(p.margin || 0), 0);
+  const maxTotal = state.equity * cfg.maxTotalMarginPct / 100;
+
+  if (totalMargin + margin > maxTotal) return { ok: false, reason: 'MAX_TOTAL_MARGIN' };
+
+  if (Math.max(0, -state.dailyLossPct) >= cfg.maxDailyLossPct) {
+    return { ok: false, reason: 'DAILY_LOSS' };
+  }
+
+  if (state.drawdownPct >= cfg.maxDrawdownPct) {
+    return { ok: false, reason: 'MAX_DRAWDOWN' };
+  }
+
+  if ((cooldown.get(symbol) || 0) > now()) {
+    return { ok: false, reason: 'COOLDOWN' };
+  }
+
+  return { ok: true };
+}
+
+function marginFor() {
+  const equity = Math.max(0, Number(state.equity || cfg.capital));
+  const byPosition = equity * cfg.maxPositionMarginPct / 100;
+  const totalMax = equity * cfg.maxTotalMarginPct / 100;
+  const used = state.positions.reduce((s, p) => s + Number(p.margin || 0), 0);
+  return Math.max(0, Math.min(byPosition, totalMax - used));
+}
+
+function cleanJsonText(text) {
+  let s = String(text || '').trim();
+  if (s.startsWith('```')) {
+    s = s.replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
+  }
+  const a = s.indexOf('{');
+  const b = s.lastIndexOf('}');
+  return a >= 0 && b > a ? s.slice(a, b + 1) : s;
+}
+
+function actionOpportunity(action, marketRow) {
+  if (!marketRow) return null;
+
+  const direction = action === 'OPEN_LONG' ? 1 : -1;
+  const tech =
+    direction * Number(marketRow.momentum5m || 0) * 0.8 +
+    direction * Number(marketRow.momentum15m || 0) * 0.5;
+
+  const traderRatio = Number(marketRow.behavior?.positionRatio || 1);
+  const traderSignal = direction === 1
+    ? Math.log(Math.max(0.2, traderRatio))
+    : -Math.log(Math.max(0.2, traderRatio));
+
+  const volume = Math.max(0, Number(marketRow.volumeRatio || 1) - 1) * 0.15;
+  const consistency = Number(marketRow.behavior?.consistency || 0) * 0.3;
+
+  return tech + traderSignal * 0.6 + volume + consistency;
 }
 
 async function askAI(market, account) {
-  state.aiAttempts++;
-  state.aiLastCallAt = new Date().toISOString();
-  state.aiStatus = 'LLAMANDO IA';
-  if (!cfg.openaiKey) {
-    state.aiReady = false;
-    state.aiStatus = 'SIN API KEY';
-    state.aiLastError = 'OPENAI_API_KEY no configurada';
-    throw new Error('OPENAI_API_KEY no configurada');
-  }
-  const key = String(cfg.openaiKey).trim();
-  if (/[^\x00-\x7F]/.test(key)) {
-    state.aiReady = false;
-    state.aiStatus = 'API KEY INVÁLIDA';
-    state.aiLastError = 'OPENAI_API_KEY contiene caracteres no ASCII';
-    throw new Error('OPENAI_API_KEY contiene caracteres no ASCII');
-  }
-  const startedAt = Date.now();
+  if (!cfg.openaiKey) throw new Error('OPENAI_API_KEY no configurada');
 
   const positions = (account.positions || []).map(p => ({
     symbol: p.symbol,
@@ -572,82 +954,135 @@ async function askAI(market, account) {
     mark: p.mark,
     pnl: p.pnl,
     margin: p.margin,
-    unrealizedPct: p.margin ? (Number(p.pnl || 0) / Number(p.margin)) * 100 : 0,
-    ageMinutes: p.openedTs ? Math.max(0, (Date.now() - Number(p.openedTs)) / 60000) : 0
+    ageSec: p.openedTs ? Math.round((now() - p.openedTs) / 1000) : undefined,
+    thesis: p.thesis
   }));
+
+  const longs = positions.filter(p => p.side === 'LONG').length;
+  const shorts = positions.filter(p => p.side === 'SHORT').length;
+
+  const compactMarket = market.slice(0, cfg.aiTopSymbols).map(x => {
+    const features = {
+      side: x.bias,
+      bias: x.bias,
+      behaviorSide: x.behavior?.side || 'MIXTO',
+      regime: state.regime,
+      volBucket: x.atrPct >= 1.2 ? 'HIGH' : x.atrPct <= 0.25 ? 'LOW' : 'NORMAL',
+      category: x.category
+    };
+    const learned = learnedEdge(features);
+
+    return {
+      symbol: x.symbol,
+      category: x.category,
+      price: x.price,
+      bias: x.bias,
+      change24h: x.change24h,
+      m1: x.momentum1m,
+      m5: x.momentum5m,
+      m15: x.momentum15m,
+      m30: x.momentum30m,
+      rsi: x.rsi,
+      atrPct: x.atrPct,
+      volumeRatio: x.volumeRatio,
+      breakoutUp: x.breakoutUp,
+      breakoutDown: x.breakoutDown,
+
+      topTraderAccountRatio: x.behavior?.accountRatio || 1,
+      topTraderPositionRatio: x.behavior?.positionRatio || 1,
+      topTraderAccountLongPct: x.behavior?.accountLongPct || 50,
+      topTraderAccountShortPct: x.behavior?.accountShortPct || 50,
+      topTraderPositionLongPct: x.behavior?.positionLongPct || 50,
+      topTraderPositionShortPct: x.behavior?.positionShortPct || 50,
+      topTraderSide: x.behavior?.side || 'MIXTO',
+      topTraderConsistency: x.behavior?.consistency || 0,
+      topTraderDelta5m: x.behavior?.delta5m || 0,
+
+      openInterest: x.openInterest || 0,
+      openInterestChangePct: x.openInterestChangePct || 0,
+      learnedSamples: learned.samples,
+      learnedAvgNetPct: learned.avgNetPct,
+      learnedWinRate: learned.winRate,
+      learnedPatternUsable: learned.usable
+    };
+  });
 
   const payload = {
     timestamp: new Date().toISOString(),
     regime: state.regime,
-    longPct: state.longPct,
-    shortPct: state.shortPct,
-    equity: state.equity,
-    positions,
-    directionBalance: {
-      targetLongPct: cfg.sideBalancePct,
-      targetShortPct: cfg.sideBalancePct,
-      openLongs: positions.filter(p => p.side === 'LONG').length,
-      openShorts: positions.filter(p => p.side === 'SHORT').length,
-      maxPositions: cfg.maxPositions
+
+    portfolio: {
+      equity: state.equity,
+      openPositions: positions.length,
+      longs,
+      shorts,
+      longCapacity: cfg.maxLongPositions - longs,
+      shortCapacity: cfg.maxShortPositions - shorts,
+      target: '50% LONG / 50% SHORT when valid opportunities exist'
     },
-    market: market.slice(0, cfg.aiTopSymbols),
-    universePolicy: {
-      normal: 'competencia abierta',
-      meme: 'incluidas activamente; no requieren cuota de capital',
-      newListings: `listados de hasta ${cfg.newListingDays} días incluidos activamente`,
-      selection: 'las oportunidades compiten por expectativa neta, liquidez, volatilidad y confirmación'
-    }
+
+    marketCoverage: {
+      completeUniverse: state.symbols,
+      deepScannedThisCycle: state.deepScanned,
+      aiAnalyzed: compactMarket.length,
+      behaviorCoveragePct: state.behaviorCoverage,
+      behaviorBias: state.behaviorBias,
+      behaviorConfidence: state.behaviorConfidence
+    },
+
+    learning: learningSummary(),
+    market: compactMarket,
+    positions
   };
 
   const instructions = `
-Eres GALAXI, un motor autónomo de decisión para futuros USD-M de Binance.
-Tu trabajo es analizar el snapshot y decidir qué hacer AHORA. No uses una regla fija de score.
-Combina estructura de mercado, momentum multitemporal, RSI, EMA, ATR, volumen, rupturas,
-régimen y contexto de las posiciones existentes. Busca oportunidades LONG y SHORT y evita
-abrir repetidamente el mismo símbolo sin una nueva tesis.
+Eres GALAXI V32, un motor autónomo de decisión para Binance USDⓈ-M Futures.
 
-BALANCE DE DIRECCIÓN 50/50:
-- Objetivo de cartera: 50% LONG y 50% SHORT sobre las posiciones abiertas.
-- Si hay más LONG que SHORT, prioriza SHORT cuando exista una señal válida.
-- Si hay más SHORT que LONG, prioriza LONG cuando exista una señal válida.
-- No inventes operaciones para completar el 50/50: debe existir una oportunidad válida.
+OBJETIVO:
+Encontrar operaciones con expectativa neta positiva después de comisiones, gestionar
+las posiciones existentes y evitar operar por impulso o por familiaridad con una moneda.
 
-UNIVERSO DE OPORTUNIDADES:
-- No te limites a BTC/ETH ni a las monedas que hayan operado ciclos anteriores.
-- Considera simultáneamente monedas normales, altcoins, MEMECOINS y LISTADOS NUEVOS.
-- Los listados nuevos incluidos en market llevan category NEW o NEW_MEME. Evalúalos con
-  especial atención a liquidez, spread, volumen, volatilidad y calidad de datos.
-- Las memecoins llevan category MEME o NEW_MEME. No debes ignorarlas por ser memecoins,
-  pero tampoco debes abrirlas por ser memecoins: compiten por la misma expectativa neta.
-- LONG y SHORT deben competir en igualdad. Un régimen BAJISTA no obliga a abrir SHORT,
-  pero sí permite SHORT cuando exista una entrada confirmada; lo mismo para LONG.
-- Prioriza oportunidades con confirmación desde AHORA, no movimientos ya demasiado extendidos.
+CAPAS QUE DEBES COMBINAR:
+1) Mercado completo: no te limites a BTC/ETH ni a las monedas ya operadas.
+2) Momentum y estructura multitemporal.
+3) Volumen, volatilidad, RSI, EMA y rupturas.
+4) Comportamiento agregado de los Top Traders de Binance.
+5) Open Interest cuando esté disponible.
+6) Memoria de resultados propios de GALAXI.
+7) Estado actual de la cartera y tesis de cada posición.
 
-OBJETIVO ECONÓMICO PRIORITARIO:
-- Tu objetivo es maximizar el PnL NETO esperado y proteger la equity.
-- No operes por obligación ni por cantidad de posiciones.
-- Solo abras una operación cuando la expectativa neta sea favorable después de spread, comisiones y riesgo y sea de al menos ${cfg.minExpectedNetPct}%.
-- Si no hay posiciones abiertas y existe una oportunidad con sesgo claro, confirmación multitemporal, volumen suficiente y expectativa neta >= ${cfg.minExpectedNetPct}%, debes proponer OPEN_LONG u OPEN_SHORT en vez de devolver HOLD por exceso de prudencia.
-- No confundas una tendencia correcta con una entrada rentable: importa el precio actual y el movimiento esperado desde AHORA.
+TOP TRADERS:
+Los datos son agregados del 20% superior por saldo de margen; NO son identidades
+individuales. Úsalos como señal de comportamiento colectivo y no como copia ciega.
 
-GESTIÓN DE POSICIONES (OBLIGATORIA):
-- En CADA ciclo evalúa las posiciones existentes usando entry, mark, PnL, unrealizedPct, dirección y antigüedad.
-- Una posición NO queda bloqueada por su tesis original. Puedes cerrarla en cualquier ciclo.
-- Si la expectativa futura de una posición es negativa, prioriza CLOSE.
-- Si existe una oportunidad claramente mejor para el capital, puedes cerrar una posición débil y reasignar el margen.
-- No mantengas una posición perdedora solo esperando que vuelva al precio de entrada.
-- HOLD solo cuando conservar la posición tenga expectativa neta favorable.
+BALANCE:
+- Máximo ${cfg.maxLongPositions} LONG y ${cfg.maxShortPositions} SHORT.
+- Objetivo estructural: 50% LONG / 50% SHORT cuando existan oportunidades válidas.
+- Si una dirección está llena, no abras más de esa dirección.
+- No inventes una operación sólo para completar 50/50.
+- Si LONG y SHORT compiten, compara expectativa neta, confirmación, liquidez,
+  comportamiento Top Trader y memoria histórica.
 
-ACCIONES:
-- Las acciones permitidas son OPEN_LONG, OPEN_SHORT, CLOSE y HOLD.
-- CLOSE tiene prioridad sobre OPEN cuando una posición existente perdió expectativa positiva.
-- Para CLOSE usa una posición existente.
-- Para OPEN el campo margin_pct es porcentaje de equity destinado a margen, entre 0.25 y 2.
-- Para OPEN debes informar expected_net_pct: utilidad neta esperada en porcentaje desde el precio actual, después de costes.
-- No inventes símbolos. Usa únicamente símbolos presentes en market.
-- No cierres una posición solo por ruido de un tick; utiliza contexto multitemporal y expectativa futura.
-- No puedes modificar los límites de riesgo del sistema.
-- Devuelve ÚNICAMENTE JSON válido.
+ENTRADA:
+- Sólo OPEN_LONG/OPEN_SHORT cuando la tesis esté confirmada.
+- expected_net_pct debe superar ${cfg.minExpectedNetPct}% después de comisiones.
+- Evita entradas tardías cuando el movimiento ya está demasiado extendido.
+- No repitas una moneda sólo porque funcionó antes.
+- Las monedas nuevas y memecoins compiten por mérito; no reciben una operación automática.
+- No uses el precio nominal de una moneda como criterio de oportunidad.
+
+SALIDA:
+- CLOSE tiene prioridad sobre nuevas entradas.
+- Cierra si la tesis se invalida, si el comportamiento/estructura cambia de forma clara,
+  o si la expectativa futura deja de justificar mantener la posición.
+- No mantengas una posición sólo para evitar reconocer una pérdida.
+- No cierres por un tick aislado.
+
+APRENDIZAJE:
+La memoria es evidencia, no una garantía. Un patrón sólo debe influir de forma relevante
+cuando tenga suficientes muestras. No cambies código ni inventes reglas nuevas.
+
+Devuelve ÚNICAMENTE JSON válido.
 
 Formato:
 {
@@ -657,9 +1092,9 @@ Formato:
       "action": "OPEN_LONG|OPEN_SHORT|CLOSE|HOLD",
       "symbol": "BTCUSDT",
       "margin_pct": 1.0,
-      "reason": "explicación breve basada en expectativa neta actual",
-      "confidence": 0,
-      "expected_net_pct": 0
+      "expected_net_pct": 0.20,
+      "reason": "explicación breve",
+      "confidence": 0.82
     }
   ],
   "summary": "resumen breve"
@@ -674,23 +1109,26 @@ Formato:
       method: 'POST',
       signal: controller.signal,
       headers: {
-        'Authorization': `Bearer ${key}`,
+        'Authorization': `Bearer ${cfg.openaiKey}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
         model: cfg.openaiModel,
         instructions,
-        input: JSON.stringify(payload),
+        input: safeJson(payload),
         text: {
           format: {
             type: 'json_schema',
-            name: 'galaxi_trade_decision',
+            name: 'galaxi_v32_trade_decision',
             strict: true,
             schema: {
               type: 'object',
               additionalProperties: false,
               properties: {
-                regime: { type: 'string', enum: ['ALCISTA', 'BAJISTA', 'MIXTO'] },
+                regime: {
+                  type: 'string',
+                  enum: ['ALCISTA', 'BAJISTA', 'MIXTO']
+                },
                 actions: {
                   type: 'array',
                   maxItems: cfg.maxActionsPerCycle,
@@ -698,14 +1136,24 @@ Formato:
                     type: 'object',
                     additionalProperties: false,
                     properties: {
-                      action: { type: 'string', enum: ['OPEN_LONG', 'OPEN_SHORT', 'CLOSE', 'HOLD'] },
+                      action: {
+                        type: 'string',
+                        enum: ['OPEN_LONG', 'OPEN_SHORT', 'CLOSE', 'HOLD']
+                      },
                       symbol: { type: 'string' },
                       margin_pct: { type: 'number' },
+                      expected_net_pct: { type: 'number' },
                       reason: { type: 'string' },
-                      confidence: { type: 'number' },
-                      expected_net_pct: { type: 'number' }
+                      confidence: { type: 'number' }
                     },
-                    required: ['action', 'symbol', 'margin_pct', 'reason', 'confidence', 'expected_net_pct']
+                    required: [
+                      'action',
+                      'symbol',
+                      'margin_pct',
+                      'expected_net_pct',
+                      'reason',
+                      'confidence'
+                    ]
                   }
                 },
                 summary: { type: 'string' }
@@ -718,39 +1166,268 @@ Formato:
     });
 
     const text = await res.text();
-    if (!res.ok) {
-      state.aiReady = false;
-      state.aiStatus = `ERROR ${res.status}`;
-      state.aiLastError = `OPENAI ${res.status}: ${text.slice(0, 700)}`;
-      throw new Error(`OPENAI ${res.status}: ${text.slice(0, 500)}`);
-    }
+    if (!res.ok) throw new Error(`OPENAI ${res.status}: ${text.slice(0, 500)}`);
 
     const data = JSON.parse(text);
-    const outputText = data.output_text ||
-      data.output?.flatMap(x => x.content || []).find(x => x.type === 'output_text')?.text || '';
+    const outputText =
+      data.output_text ||
+      data.output?.flatMap(x => x.content || [])
+        .find(x => x.type === 'output_text')?.text ||
+      '';
 
-    if (!outputText) {
-      state.aiReady = false;
-      state.aiStatus = 'RESPUESTA VACÍA';
-      state.aiLastError = 'OpenAI respondió sin output_text';
-      throw new Error('OpenAI respondió sin output_text');
-    }
     const decision = JSON.parse(cleanJsonText(outputText));
     state.aiCalls++;
-    state.aiSuccess++;
-    state.aiReady = true;
-    state.aiStatus = 'CONECTADA';
-    state.aiLastError = null;
-    state.aiLatencyMs = Date.now() - startedAt;
     return decision;
-  } catch (e) {
-    state.aiErrors++;
-    state.aiReady = false;
-    if (!state.aiLastError) state.aiLastError = e?.message || String(e);
-    if (e?.name === 'AbortError') state.aiStatus = 'TIMEOUT';
-    throw e;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+function findMarketRow(market, symbol) {
+  return market.find(x => x.symbol === symbol);
+}
+
+function validateAndRankActions(decision, market) {
+  const actions = Array.isArray(decision.actions) ? decision.actions : [];
+  const rows = [];
+
+  for (const a of actions) {
+    const action = String(a.action || '').toUpperCase();
+    const symbol = String(a.symbol || '').toUpperCase();
+    const row = findMarketRow(market, symbol);
+
+    if (!['OPEN_LONG', 'OPEN_SHORT', 'CLOSE', 'HOLD'].includes(action)) continue;
+    if (!symbol || !marketInfo.has(symbol)) continue;
+
+    if (action === 'CLOSE') {
+      const exists = state.positions.some(p => p.symbol === symbol);
+      if (!exists) continue;
+      rows.push({ ...a, action, symbol });
+      continue;
+    }
+
+    if (action === 'HOLD') continue;
+
+    if (!row) continue;
+
+    const expected = Number(a.expected_net_pct || 0);
+    const confidence = clamp(Number(a.confidence || 0), 0, 1);
+
+    if (expected < cfg.minExpectedNetPct) continue;
+    if (confidence < 0.55) continue;
+
+    const side = action === 'OPEN_LONG' ? 'LONG' : 'SHORT';
+    const marginPct = clamp(Number(a.margin_pct || 1), 0.25, cfg.maxPositionMarginPct);
+
+    const features = {
+      side,
+      bias: row.bias,
+      behaviorSide: row.behavior?.side || 'MIXTO',
+      regime: state.regime,
+      volBucket: row.atrPct >= 1.2 ? 'HIGH' : row.atrPct <= 0.25 ? 'LOW' : 'NORMAL',
+      category: row.category
+    };
+
+    const learned = learnedEdge(features);
+    const learningAdjustment =
+      learned.usable ? clamp(learned.avgNetPct * 0.20, -0.15, 0.15) : 0;
+
+    // A historically weak pattern must clear a slightly higher hurdle.
+    if (learned.usable && learned.avgNetPct < 0 && expected + learningAdjustment < cfg.minExpectedNetPct + 0.05) {
+      continue;
+    }
+
+    rows.push({
+      ...a,
+      action,
+      symbol,
+      side,
+      margin_pct: marginPct,
+      expected_net_pct: expected,
+      confidence,
+      learning: learned
+    });
+  }
+
+  // CLOSE first: risk management is more important than filling new slots.
+  rows.sort((a, b) => {
+    if (a.action === 'CLOSE' && b.action !== 'CLOSE') return -1;
+    if (b.action === 'CLOSE' && a.action !== 'CLOSE') return 1;
+
+    const sa = Number(a.expected_net_pct || 0) * Number(a.confidence || 0);
+    const sb = Number(b.expected_net_pct || 0) * Number(b.confidence || 0);
+    return sb - sa;
+  });
+
+  return rows;
+}
+
+function paperOpen(a, marketRow) {
+  const symbol = a.symbol;
+  if (state.positions.some(p => p.symbol === symbol)) {
+    return { skipped: true, reason: 'SYMBOL_ALREADY_OPEN' };
+  }
+
+  const side = a.action === 'OPEN_LONG' ? 'LONG' : 'SHORT';
+  const marginPct = clamp(Number(a.margin_pct || 1), 0.25, cfg.maxPositionMarginPct);
+  const margin = Math.min(state.equity * marginPct / 100, marginFor());
+
+  const risk = riskAllowsOpen(symbol, margin, side);
+  if (!risk.ok) return { skipped: true, reason: risk.reason };
+
+  const price = Number(ticks.get(symbol)?.price || marketRow?.price || 0);
+  if (!(price > 0) || !(margin > 0)) {
+    return { skipped: true, reason: 'NO_PRICE_OR_MARGIN' };
+  }
+
+  const qty = normalizeQty(symbol, margin * cfg.leverage / price);
+  if (!(qty > 0)) return { skipped: true, reason: 'QTY_TOO_SMALL' };
+
+  const notional = qty * price;
+  const entryFee = notional * cfg.estimatedFeeRate;
+
+  const p = {
+    id: `V32_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    symbol,
+    side,
+    entry: normalizePrice(symbol, price),
+    current: normalizePrice(symbol, price),
+    margin,
+    qty,
+    entryNotional: notional,
+    fees: entryFee,
+    pnl: -entryFee,
+    unrealizedPct: -entryFee / margin * 100,
+    leverage: cfg.leverage,
+
+    confidence: Number(a.confidence || 0),
+    expectedNetPct: Number(a.expected_net_pct || 0),
+    strategy: 'V32_BEHAVIORAL',
+    thesis: a.reason,
+
+    features: {
+      bias: marketRow.bias,
+      behaviorSide: marketRow.behavior?.side || 'MIXTO',
+      regime: state.regime,
+      volBucket: marketRow.atrPct >= 1.2 ? 'HIGH' : marketRow.atrPct <= 0.25 ? 'LOW' : 'NORMAL',
+      category: marketRow.category
+    },
+
+    openedAt: new Date().toISOString(),
+    openedTs: now()
+  };
+
+  state.positions.push(p);
+  cooldown.set(symbol, now() + 60000);
+
+  pushHistory({
+    action: 'AI_OPEN',
+    symbol,
+    side,
+    margin: round(margin, 4),
+    expectedNetPct: round(a.expected_net_pct, 4),
+    reason: a.reason
+  });
+
+  return { opened: true };
+}
+
+function paperClose(a, reasonOverride = null) {
+  const p = state.positions.find(x => x.symbol === a.symbol);
+  if (!p) return { skipped: true, reason: 'NO_POSITION' };
+
+  const t = ticks.get(p.symbol);
+  if (t?.price) p.current = t.price;
+
+  const move = p.side === 'LONG'
+    ? p.current - p.entry
+    : p.entry - p.current;
+
+  const grossPnl = move * p.qty;
+  const exitNotional = Math.abs(p.current * p.qty);
+  const exitFee = exitNotional * cfg.estimatedFeeRate;
+
+  p.pnl = grossPnl - p.fees - exitFee;
+  p.fees += exitFee;
+
+  state.realizedPnl += p.pnl;
+  state.positions = state.positions.filter(x => x.id !== p.id);
+  cooldown.set(p.symbol, now() + 60000);
+
+  const reason = reasonOverride || a.reason || 'AI_CLOSE';
+  learnFromTrade(p, reason);
+
+  pushHistory({
+    action: 'AI_CLOSE',
+    symbol: p.symbol,
+    side: p.side,
+    pnl: round(p.pnl, 4),
+    fees: round(p.fees, 4),
+    reason
+  });
+
+  state.lastSignal =
+    `AI PAPER CLOSE ${p.symbol} ${p.side} · PnL ${p.pnl.toFixed(2)} · ${reason}`;
+
+  return { closed: true };
+}
+
+function markPaperPositions(market) {
+  const keep = [];
+  const tNow = now();
+
+  for (const p of state.positions) {
+    const t = ticks.get(p.symbol);
+    if (t?.price) p.current = t.price;
+
+    const move = p.side === 'LONG'
+      ? p.current - p.entry
+      : p.entry - p.current;
+
+    const grossPnl = move * p.qty;
+    p.pnl = grossPnl - p.fees;
+
+    p.unrealizedPct = p.margin ? p.pnl / p.margin * 100 : 0;
+
+    const age = tNow - p.openedTs;
+    const tp = p.unrealizedPct >= cfg.paperTpPct;
+    const sl = p.unrealizedPct <= -cfg.paperSlPct;
+    const timeout = age >= cfg.paperMaxHoldMs;
+
+    // If price data disappeared, never force a close from a fake price.
+    if (!Number.isFinite(p.current) || p.current <= 0) {
+      keep.push(p);
+      continue;
+    }
+
+    if (tp || sl || timeout) {
+      const reason = tp ? 'TP' : sl ? 'SL' : 'TIME';
+      paperClose({ symbol: p.symbol, reason }, reason);
+    } else {
+      keep.push(p);
+    }
+  }
+
+  // paperClose mutates state.positions, so only restore the positions that
+  // survived. This also guarantees deterministic exit handling.
+  const openIds = new Set(keep.map(x => x.id));
+  state.positions = state.positions.filter(x => openIds.has(x.id));
+}
+
+function emergencyStopCheck() {
+  if (fs.existsSync(controlFile)) {
+    try {
+      const c = JSON.parse(fs.readFileSync(controlFile, 'utf8'));
+      if (c.stop) stopped = true;
+    } catch {}
+  }
+
+  if (
+    state.drawdownPct >= cfg.maxDrawdownPct ||
+    Math.max(0, -state.dailyLossPct) >= cfg.maxDailyLossPct
+  ) {
+    stopped = true;
+    state.lastSignal = 'STOP AUTOMÁTICO POR RIESGO';
   }
 }
 
@@ -766,6 +1443,7 @@ async function getLiveAccount() {
       const entry = Number(p.entryPrice);
       const mark = Number(p.markPrice);
       const pnl = Number(p.unRealizedProfit);
+
       return {
         symbol: p.symbol,
         side,
@@ -773,7 +1451,8 @@ async function getLiveAccount() {
         entry,
         mark,
         pnl,
-        margin: Math.abs(Number(p.notional || 0)) / cfg.leverage
+        margin: Math.abs(Number(p.notional || 0)) / cfg.leverage,
+        openedTs: undefined
       };
     });
 
@@ -794,8 +1473,15 @@ function paperAccount() {
     wallet: state.equity,
     unrealizedPnl: state.unrealizedPnl,
     positions: state.positions.map(p => ({
-      symbol: p.symbol, side: p.side, qty: p.qty, entry: p.entry,
-      mark: p.current, pnl: p.pnl, margin: p.margin
+      symbol: p.symbol,
+      side: p.side,
+      qty: p.qty,
+      entry: p.entry,
+      mark: p.current,
+      pnl: p.pnl,
+      margin: p.margin,
+      openedTs: p.openedTs,
+      thesis: p.thesis
     }))
   };
 }
@@ -807,13 +1493,14 @@ async function setLeverage(symbol) {
       params: { symbol, leverage: cfg.leverage }
     }, true);
   } catch (e) {
-    // If already set or restricted, order can still proceed.
     state.lastError = `Leverage ${symbol}: ${e.message}`;
   }
 }
 
 async function placeMarketOrder(symbol, side, qty, reduceOnly = false) {
-  if (!cfg.binanceKey || !cfg.binanceSecret) throw new Error('BINANCE API no configurada');
+  if (!cfg.binanceKey || !cfg.binanceSecret) {
+    throw new Error('BINANCE API no configurada');
+  }
 
   const quantity = normalizeQty(symbol, qty);
   if (!(quantity > 0)) throw new Error(`Cantidad inválida ${symbol}`);
@@ -831,163 +1518,78 @@ async function placeMarketOrder(symbol, side, qty, reduceOnly = false) {
     quantity,
     newOrderRespType: 'RESULT'
   };
+
   if (reduceOnly) params.reduceOnly = 'true';
 
-  const order = await rest('/fapi/v1/order', { method: 'POST', params }, true);
+  const order = await rest('/fapi/v1/order', {
+    method: 'POST',
+    params
+  }, true);
+
   lastOrderTs = Date.now();
   return order;
 }
 
-async function executeLiveAction(a) {
-  if (!cfg.liveArmed) throw new Error('LIVE bloqueado: establece LIVE_ARMED=true');
+async function executeLiveAction(a, marketRow) {
+  if (!cfg.liveArmed) throw new Error('LIVE bloqueado: LIVE_ARMED=true requerido');
 
   const live = await getLiveAccount();
   const existing = live.positions.find(p => p.symbol === a.symbol);
 
   if (a.action === 'CLOSE') {
     if (!existing) return { skipped: true, reason: 'NO_POSITION' };
+
     const closeSide = existing.side === 'LONG' ? 'SELL' : 'BUY';
     const order = await placeMarketOrder(existing.symbol, closeSide, existing.qty, true);
-    pushHistory({ action: 'LIVE_CLOSE', symbol: existing.symbol, side: existing.side, orderId: order.orderId, reason: a.reason });
+
+    pushHistory({
+      action: 'LIVE_CLOSE',
+      symbol: existing.symbol,
+      side: existing.side,
+      orderId: order.orderId,
+      reason: a.reason
+    });
+
     return { order };
   }
 
   if (a.action === 'OPEN_LONG' || a.action === 'OPEN_SHORT') {
     if (existing) return { skipped: true, reason: 'SYMBOL_ALREADY_OPEN' };
 
-    const margin = clamp(
-      live.equity * clamp(Number(a.margin_pct || 1), 0.25, cfg.maxPositionMarginPct) / 100,
-      live.equity * 0.0025,
-      live.equity * cfg.maxPositionMarginPct / 100
-    );
+    const sideName = a.action === 'OPEN_LONG' ? 'LONG' : 'SHORT';
+    const margin = live.equity *
+      clamp(Number(a.margin_pct || 1), 0.25, cfg.maxPositionMarginPct) / 100;
+
+    const risk = riskAllowsOpen(a.symbol, margin, sideName);
+    if (!risk.ok) return { skipped: true, reason: risk.reason };
 
     const notional = margin * cfg.leverage;
-    const price = Number(ticks.get(a.symbol)?.price || 0);
+    const price = Number(ticks.get(a.symbol)?.price || marketRow?.price || 0);
     if (!(price > 0)) return { skipped: true, reason: 'NO_PRICE' };
 
     const qty = normalizeQty(a.symbol, notional / price);
     if (!(qty > 0)) return { skipped: true, reason: 'QTY_TOO_SMALL' };
 
-    const risk = riskAllowsOpen(a.symbol, margin);
-    if (!risk.ok) return { skipped: true, reason: risk.reason };
-
     const side = a.action === 'OPEN_LONG' ? 'BUY' : 'SELL';
     const order = await placeMarketOrder(a.symbol, side, qty, false);
+
     cooldown.set(a.symbol, now() + 60000);
+
     pushHistory({
       action: 'LIVE_OPEN',
       symbol: a.symbol,
-      side: a.action === 'OPEN_LONG' ? 'LONG' : 'SHORT',
-      qty, margin, orderId: order.orderId, reason: a.reason
+      side: sideName,
+      qty,
+      margin,
+      expectedNetPct: a.expected_net_pct,
+      orderId: order.orderId,
+      reason: a.reason
     });
+
     return { order };
   }
 
   return { skipped: true, reason: 'HOLD' };
-}
-
-function paperOpen(a) {
-  const symbol = a.symbol;
-  const held = state.positions.find(p => p.symbol === symbol);
-  if (held) return { skipped: true, reason: 'SYMBOL_ALREADY_OPEN' };
-
-  const marginPct = clamp(Number(a.margin_pct || 1), 0.25, cfg.maxPositionMarginPct);
-  const margin = Math.min(state.equity * marginPct / 100, marginFor());
-  const risk = riskAllowsOpen(symbol, margin);
-  if (!risk.ok) return { skipped: true, reason: risk.reason };
-
-  const price = Number(ticks.get(symbol)?.price || 0);
-  if (!(price > 0) || !(margin > 0)) return { skipped: true, reason: 'NO_PRICE_OR_MARGIN' };
-
-  const side = a.action === 'OPEN_LONG' ? 'LONG' : 'SHORT';
-  const qty = margin * cfg.leverage / price;
-
-  const p = {
-    id: `AI_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    symbol, side, entry: price, current: price,
-    margin, qty, pnl: 0,
-    leverage: cfg.leverage,
-    confidence: Number(a.confidence || 0),
-    strategy: 'AI',
-    thesis: a.reason,
-    openedAt: new Date().toISOString(),
-    openedTs: now()
-  };
-
-  state.positions.push(p);
-  cooldown.set(symbol, now() + 60000);
-  state.lastSignal = `AI PAPER OPEN ${symbol} ${side} · ${Math.round(a.confidence)}%`;
-  pushHistory({ action: 'AI_OPEN', symbol, side, margin, reason: a.reason });
-  return { opened: true };
-}
-
-function paperClose(a) {
-  const p = state.positions.find(x => x.symbol === a.symbol);
-  if (!p) return { skipped: true, reason: 'NO_POSITION' };
-
-  const t = ticks.get(p.symbol);
-  if (t?.price) p.current = t.price;
-
-  const move = p.side === 'LONG' ? p.current - p.entry : p.entry - p.current;
-  p.pnl = move * p.qty;
-  state.realizedPnl += p.pnl;
-  state.positions = state.positions.filter(x => x.id !== p.id);
-  cooldown.set(p.symbol, now() + 60000);
-
-  pushHistory({
-    action: 'AI_CLOSE',
-    symbol: p.symbol,
-    side: p.side,
-    pnl: round(p.pnl, 4),
-    reason: a.reason
-  });
-
-  state.lastSignal = `AI PAPER CLOSE ${p.symbol} ${p.side} · PnL ${p.pnl.toFixed(2)}`;
-  return { closed: true };
-}
-
-function markPaperPositions() {
-  const keep = [];
-  const tNow = now();
-
-  // A position is never allowed to keep a stale mark silently. If the live
-  // tick is missing, the last known price remains the explicit fallback; the
-  // REST refresh in runCycle normally supplies the fresh value.
-
-
-  for (const p of state.positions) {
-    const t = ticks.get(p.symbol);
-    if (t?.price) p.current = t.price;
-
-    const move = p.side === 'LONG' ? p.current - p.entry : p.entry - p.current;
-    p.pnl = move * p.qty;
-    p.unrealizedPct = p.margin ? p.pnl / p.margin * 100 : 0;
-
-    const age = tNow - p.openedTs;
-    const mature = age >= cfg.paperMinHoldMs;
-    const tp = mature && p.unrealizedPct >= cfg.paperTpPct;
-    const sl = mature && p.unrealizedPct <= -cfg.paperSlPct;
-    const timeout = mature && age >= cfg.paperMaxHoldMs;
-
-    // HARD CLOSE PATH: every PAPER position has deterministic exit rules.
-    // The AI may also issue CLOSE, but it can never leave a position open
-    // indefinitely because of repeated HOLD decisions.
-    if (tp || sl || timeout) {
-      state.realizedPnl += p.pnl;
-      pushHistory({
-        action: 'RISK_CLOSE',
-        symbol: p.symbol,
-        side: p.side,
-        pnl: round(p.pnl, 4),
-        reason: tp ? 'TP' : sl ? 'SL' : 'TIMEOUT'
-      });
-      cooldown.set(p.symbol, tNow + 60000);
-    } else {
-      keep.push(p);
-    }
-  }
-
-  state.positions = keep;
 }
 
 async function executeDecision(decision, market) {
@@ -995,94 +1597,30 @@ async function executeDecision(decision, market) {
   state.aiReasoning = decision.summary || '';
   state.regime = decision.regime || state.regime;
 
-  let rawActions = Array.isArray(decision.actions) ? decision.actions : [];
-
-  // SIMPLE ENTRY MODE: when the account is flat, prefer actually taking a
-  // clear market position instead of remaining paralyzed in HOLD. The AI
-  // still decides normally first; this fallback only acts when it returned
-  // no OPEN action. PAPER remains the default and risk limits still apply.
-  if ((!state.positions || state.positions.length === 0) &&
-      !rawActions.some(a => a && (a.action === 'OPEN_LONG' || a.action === 'OPEN_SHORT'))) {
-    const top = Array.isArray(market) ? (market.find(m => {
-      if (!m?.symbol || cooldown.has(m.symbol)) return false;
-      return m.bias === 'LONG' || m.bias === 'SHORT' ||
-        Math.abs(Number(m.momentum5m || 0)) > 0.02 ||
-        Math.abs(Number(m.momentum15m || 0)) > 0.04;
-    }) || market.find(m => m?.symbol && !cooldown.has(m.symbol))) : null;
-
-    if (top) {
-      const side = top.bias === 'SHORT' ||
-        (top.bias !== 'LONG' && Number(top.momentum5m || 0) < 0 && Number(top.momentum15m || 0) < 0)
-        ? 'OPEN_SHORT' : 'OPEN_LONG';
-      rawActions = [{
-        action: side,
-        symbol: top.symbol,
-        margin_pct: 0.75,
-        reason: `Entrada simple: ${side === 'OPEN_LONG' ? 'sesgo alcista' : 'sesgo bajista'} y momentum actual en ${top.symbol}.`,
-        confidence: 0.60,
-        expected_net_pct: Math.max(cfg.minExpectedNetPct, 0.03)
-      }, ...rawActions];
-      state.aiReasoning = `${decision.summary || ''} | MODO SIMPLE: se tomó posición en ${top.symbol}.`;
-    }
-  }
-
-  // Reject new entries whose declared net expectancy does not clear the minimum edge.
-  const filteredActions = rawActions.filter(a => {
-    if (!a || !['OPEN_LONG','OPEN_SHORT','CLOSE','HOLD'].includes(a.action)) return false;
-    if (a.action === 'OPEN_LONG' || a.action === 'OPEN_SHORT') {
-      return Number(a.expected_net_pct) >= cfg.minExpectedNetPct;
-    }
-    return true;
-  });
-  // Position management has priority: CLOSE decisions execute before new entries.
-  // Directional balance: target 50% LONG / 50% SHORT. With 12 max positions,
-  // no more than 6 open positions are allowed on either side. When imbalanced,
-  // valid entries from the underrepresented side are preferred.
-  const longOpen = state.positions.filter(p => p.side === 'LONG').length;
-  const shortOpen = state.positions.filter(p => p.side === 'SHORT').length;
-  const maxPerSide = Math.max(1, Math.floor(cfg.maxPositions * cfg.sideBalancePct / 100));
-
-  const closeActions = filteredActions
-    .filter(a => a.action === 'CLOSE' && state.positions.some(p => p.symbol === a.symbol))
-    .sort((a, b) => {
-      const pa = state.positions.find(p => p.symbol === a.symbol);
-      const pb = state.positions.find(p => p.symbol === b.symbol);
-      return Number(pb?.pnl || 0) - Number(pa?.pnl || 0);
-    });
-  const openActions = filteredActions.filter(a => a.action === 'OPEN_LONG' || a.action === 'OPEN_SHORT');
-  const holdActions = filteredActions.filter(a => a.action === 'HOLD');
-
-  const balancedOpens = openActions
-    .filter(a => {
-      if (a.action === 'OPEN_LONG' && longOpen >= maxPerSide) return false;
-      if (a.action === 'OPEN_SHORT' && shortOpen >= maxPerSide) return false;
-      return true;
-    })
-    .sort((a, b) => {
-      const aPreferred = longOpen < shortOpen ? (a.action === 'OPEN_LONG') : shortOpen < longOpen ? (a.action === 'OPEN_SHORT') : false;
-      const bPreferred = longOpen < shortOpen ? (b.action === 'OPEN_LONG') : shortOpen < longOpen ? (b.action === 'OPEN_SHORT') : false;
-      if (aPreferred !== bPreferred) return aPreferred ? -1 : 1;
-      return Number(b.expected_net_pct || 0) - Number(a.expected_net_pct || 0);
-    });
-
-  const actions = [...closeActions, ...balancedOpens, ...holdActions]
+  const actions = validateAndRankActions(decision, market)
     .slice(0, cfg.maxActionsPerCycle);
-  state.riskApproved = actions.filter(x => x.action !== 'HOLD').length;
+
+  state.riskApproved = actions.length;
+
+  // CLOSE is always processed before new positions.
+  const closes = actions.filter(a => a.action === 'CLOSE');
+  const opens = actions.filter(a => a.action !== 'CLOSE');
 
   if (cfg.mode === 'PAPER') {
-    for (const a of actions) {
+    for (const a of closes) {
+      try { paperClose(a); }
+      catch (e) { state.lastError = `PAPER CLOSE: ${e.message}`; }
+    }
+
+    for (const a of opens) {
       try {
-        let result;
-        if (a.action === 'OPEN_LONG' || a.action === 'OPEN_SHORT') result = paperOpen(a);
-        else if (a.action === 'CLOSE') result = paperClose(a);
-        if (result?.skipped) {
-          state.lastSignal = `PAPER ${a.action} ${a.symbol}: ${result.reason}`;
-          pushHistory({ action: 'PAPER_SKIP', symbol: a.symbol, reason: result.reason });
-        }
+        const row = findMarketRow(market, a.symbol);
+        if (row) paperOpen(a, row);
       } catch (e) {
-        state.lastError = `PAPER action: ${e.message}`;
+        state.lastError = `PAPER OPEN: ${e.message}`;
       }
     }
+
     return;
   }
 
@@ -1091,28 +1629,22 @@ async function executeDecision(decision, market) {
       state.lastSignal = 'LIVE seleccionado pero LIVE_ARMED=false';
       return;
     }
-    for (const a of actions) {
-      try {
-        await executeLiveAction(a);
-      } catch (e) {
-        state.lastError = `LIVE action: ${e.message}`;
+
+    for (const a of closes) {
+      try { await executeLiveAction(a, findMarketRow(market, a.symbol)); }
+      catch (e) {
+        state.lastError = `LIVE CLOSE: ${e.message}`;
         pushHistory({ action: 'LIVE_ERROR', symbol: a.symbol, reason: e.message });
       }
     }
-  }
-}
 
-function emergencyStopCheck() {
-  if (fs.existsSync(controlFile)) {
-    try {
-      const c = JSON.parse(fs.readFileSync(controlFile, 'utf8'));
-      if (c.stop) stopped = true;
-    } catch {}
-  }
-
-  if (state.drawdownPct >= cfg.maxDrawdownPct || Math.max(0, -state.dailyLossPct) >= cfg.maxDailyLossPct) {
-    stopped = true;
-    state.lastSignal = 'STOP AUTOMÁTICO POR RIESGO';
+    for (const a of opens) {
+      try { await executeLiveAction(a, findMarketRow(market, a.symbol)); }
+      catch (e) {
+        state.lastError = `LIVE OPEN: ${e.message}`;
+        pushHistory({ action: 'LIVE_ERROR', symbol: a.symbol, reason: e.message });
+      }
+    }
   }
 }
 
@@ -1145,13 +1677,21 @@ function connect() {
         const arr = JSON.parse(raw.toString());
         if (!Array.isArray(arr)) return;
 
-        const ts = now();
         for (const t of arr) {
           const symbol = t.s;
           if (!symbol?.endsWith('USDT') || !marketInfo.has(symbol)) continue;
+
           const price = Number(t.c);
           const volume = Number(t.q || 0);
-          if (price > 0) ticks.set(symbol, { price, volume, ts });
+          if (price > 0) {
+            const old = ticks.get(symbol) || {};
+            ticks.set(symbol, {
+              ...old,
+              price,
+              volume,
+              ts: now()
+            });
+          }
         }
       } catch {
         state.lastError = 'WS parse error';
@@ -1159,49 +1699,6 @@ function connect() {
     });
   } catch (e) {
     state.lastError = `WS init: ${e.message}`;
-  }
-}
-
-
-async function checkOpenAI() {
-  if (!cfg.openaiKey) {
-    state.aiStatus = 'SIN API KEY';
-    state.aiReady = false;
-    state.aiLastError = 'OPENAI_API_KEY no configurada';
-    return false;
-  }
-  const key = String(cfg.openaiKey).trim();
-  if (/[^\x00-\x7F]/.test(key)) {
-    state.aiStatus = 'API KEY INVÁLIDA';
-    state.aiReady = false;
-    state.aiLastError = 'OPENAI_API_KEY contiene caracteres no ASCII';
-    return false;
-  }
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), Math.min(cfg.aiTimeoutMs, 10000));
-  try {
-    const res = await fetch('https://api.openai.com/v1/models/' + encodeURIComponent(cfg.openaiModel), {
-      headers: { Authorization: `Bearer ${key}` },
-      signal: controller.signal
-    });
-    const text = await res.text();
-    if (!res.ok) {
-      state.aiStatus = `MODELO NO DISPONIBLE ${res.status}`;
-      state.aiReady = false;
-      state.aiLastError = `OPENAI MODEL CHECK ${res.status}: ${text.slice(0, 500)}`;
-      return false;
-    }
-    state.aiReady = true;
-    state.aiStatus = 'MODELO DISPONIBLE';
-    state.aiLastError = null;
-    return true;
-  } catch (e) {
-    state.aiReady = false;
-    state.aiStatus = e?.name === 'AbortError' ? 'CHECK TIMEOUT' : 'CHECK ERROR';
-    state.aiLastError = e?.message || String(e);
-    return false;
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -1219,29 +1716,20 @@ async function runCycle() {
       return;
     }
 
-    state.lastSignal = `Analizando ${state.symbols} mercados…`;
-
-    // Refresh PAPER marks before calculating PnL. This is the critical fix for
-    // frozen "actual = entrada" prices and positions that never hit TP/SL.
-    if (cfg.mode === 'PAPER') {
-      try {
-        await refreshPaperPrices();
-      } catch (e) {
-        state.lastError = `PAPER price refresh: ${e.message}`;
-      }
-    }
+    state.lastSignal =
+      `MERCADO COMPLETO ${state.symbols} · descubriendo oportunidades…`;
 
     const market = await buildMarketSnapshot();
-    state.candidates = market.length;
-    if (market.length < 5) {
-      state.lastSignal = 'Calentando datos de mercado…';
+
+    if (market.length < 8) {
+      state.lastSignal = `Calentando datos · deep=${market.length}`;
       writeState();
       return;
     }
 
     if (cfg.mode === 'PAPER') {
-      markPaperPositions();
-    } else if (cfg.mode === 'LIVE') {
+      markPaperPositions(market);
+    } else {
       try {
         lastAccount = await getLiveAccount();
         state.equity = lastAccount.equity;
@@ -1252,21 +1740,32 @@ async function runCycle() {
       }
     }
 
-    const account = cfg.mode === 'LIVE' ? (lastAccount || await getLiveAccount()) : paperAccount();
+    const account =
+      cfg.mode === 'LIVE'
+        ? (lastAccount || await getLiveAccount())
+        : paperAccount();
+
     const decision = await askAI(market, account);
     await executeDecision(decision, market);
 
     state.lastSignal = decision.summary || 'IA evaluó el mercado';
-    if (!state.lastError) state.lastError = null;
 
     if (state.cycle % 5 === 0) {
       console.log(
-        `cycle=${state.cycle} universe=${state.symbols} market=${market.length}` +
-        ` portfolio=${state.positions.length} equity=${Number(state.equity).toFixed(2)}` +
-        ` regime=${state.regime} ai=${cfg.openaiModel}`
+        `cycle=${state.cycle}` +
+        ` universe=${state.symbols}` +
+        ` deep=${state.deepScanned}` +
+        ` ai=${market.length}` +
+        ` portfolio=${state.positions.length}` +
+        ` L=${state.longOpen} S=${state.shortOpen}` +
+        ` equity=${Number(state.equity).toFixed(2)}` +
+        ` regime=${state.regime}` +
+        ` behavior=${state.behaviorBias}` +
+        ` aiModel=${cfg.openaiModel}`
       );
     }
   } catch (e) {
+    state.aiErrors += 1;
     state.lastError = e?.message || String(e);
     console.error('CYCLE_ERROR', state.lastError);
   } finally {
@@ -1275,30 +1774,43 @@ async function runCycle() {
   }
 }
 
-async function boot() {
-  console.log(`GALAXI V31 | mode=${cfg.mode} | model=${cfg.openaiModel} | scan=${cfg.scanMs}ms | SIMPLE_POSITIONS=ON`);
+function loadControl() {
+  if (!fs.existsSync(controlFile)) {
+    try {
+      fs.writeFileSync(controlFile, JSON.stringify({ stop: false }, null, 2));
+    } catch {}
+  }
+}
 
-  console.log(`OPENAI_KEY_PRESENT=${cfg.openaiKey ? 1 : 0}`);
-  console.log(`OPENAI_MODEL=${cfg.openaiModel}`);
+async function boot() {
+  console.log(
+    `GALAXI V32 | mode=${cfg.mode}` +
+    ` | model=${cfg.openaiModel}` +
+    ` | scan=${cfg.scanMs}ms` +
+    ` | deep=${cfg.deepScanSymbols}` +
+    ` | ai=${cfg.aiTopSymbols}` +
+    ` | balance=6L/6S`
+  );
+
+  loadControl();
+  loadLearning();
+
   if (!cfg.openaiKey) {
     console.warn('OPENAI_API_KEY is missing. AI decisions cannot run.');
   }
 
   if (cfg.mode === 'LIVE' && !cfg.liveArmed) {
-    console.warn('LIVE is NOT ARMED. Set LIVE_ARMED=true only when you intentionally want order execution.');
+    console.warn('LIVE is NOT ARMED. Set LIVE_ARMED=true only when intentional.');
   }
 
   await syncServerTime();
   await loadExchangeInfo();
-  await checkOpenAI();
   connect();
 
-  // Let the WS warm up before the first AI call.
   await sleep(5000);
-
   writeState();
-  await runCycle();
 
+  await runCycle();
   setInterval(runCycle, cfg.scanMs);
 }
 
