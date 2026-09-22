@@ -1,12 +1,7 @@
-GALAXI V28 POSITIONS DIRECT
+GALAXI V29 POSITIONS DIRECT FIX
 
-Base: V27.
+Corrige el problema observado en V28: la IA generaba OPEN_LONG/OPEN_SHORT correctamente, pero la capa PAPER no podía completar la entrada porque faltaban las funciones de control de margen/riesgo usadas por paperOpen().
 
-Fix principal:
-- V27's flat-account fallback referenced market out of scope, so it could not create the simple entry.
-- V28 passes the analyzed market into executeDecision.
-- If flat and AI returns no OPEN action, V28 selects the first valid market with directional/momentum evidence; if none qualifies, it uses the first valid non-cooldown market.
-- Minimum expected net default reduced to 0.01% to avoid paralysis.
-- PAPER remains default.
-
-Do not enable LIVE for this test.
+V29 restaura riskAllowsOpen() y marginFor(), y muestra el motivo si una entrada PAPER es omitida.
+Mantiene PAPER, Binance USD-M, IA, multiuniverso, LONG/SHORT, memecoins/nuevas monedas y gestión de posiciones.
+No activar LIVE para esta prueba.

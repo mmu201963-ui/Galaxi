@@ -129,6 +129,28 @@ function round(n, d = 6) {
 // JSON content itself. This helper is intentionally local to the engine so a
 // malformed model response is reported as a JSON error rather than a missing
 // function error.
+function riskAllowsOpen(symbol, margin) {
+  if (stopped) return { ok: false, reason: 'STOP' };
+  if (state.positions.length >= cfg.maxPositions) return { ok: false, reason: 'MAX_POSITIONS' };
+  const totalMargin = state.positions.reduce((sum, pos) => sum + Number(pos.margin || 0), 0);
+  const maxTotal = state.equity * cfg.maxTotalMarginPct / 100;
+  if (totalMargin + margin > maxTotal) return { ok: false, reason: 'MAX_TOTAL_MARGIN' };
+  const dailyLoss = Math.max(0, -state.dailyLossPct);
+  if (dailyLoss >= cfg.maxDailyLossPct) return { ok: false, reason: 'DAILY_LOSS' };
+  if (state.drawdownPct >= cfg.maxDrawdownPct) return { ok: false, reason: 'MAX_DRAWDOWN' };
+  const cd = cooldown.get(symbol) || 0;
+  if (cd > now()) return { ok: false, reason: 'COOLDOWN' };
+  return { ok: true };
+}
+
+function marginFor() {
+  const equity = Math.max(0, Number(state.equity || cfg.capital));
+  const byPosition = equity * cfg.maxPositionMarginPct / 100;
+  const totalMax = equity * cfg.maxTotalMarginPct / 100;
+  const used = state.positions.reduce((sum, pos) => sum + Number(pos.margin || 0), 0);
+  return Math.max(0, Math.min(byPosition, totalMax - used));
+}
+
 function cleanJsonText(value) {
   let s = String(value ?? '').trim();
   if (!s) return s;
@@ -1002,8 +1024,13 @@ async function executeDecision(decision, market) {
   if (cfg.mode === 'PAPER') {
     for (const a of actions) {
       try {
-        if (a.action === 'OPEN_LONG' || a.action === 'OPEN_SHORT') paperOpen(a);
-        else if (a.action === 'CLOSE') paperClose(a);
+        let result;
+        if (a.action === 'OPEN_LONG' || a.action === 'OPEN_SHORT') result = paperOpen(a);
+        else if (a.action === 'CLOSE') result = paperClose(a);
+        if (result?.skipped) {
+          state.lastSignal = `PAPER ${a.action} ${a.symbol}: ${result.reason}`;
+          pushHistory({ action: 'PAPER_SKIP', symbol: a.symbol, reason: result.reason });
+        }
       } catch (e) {
         state.lastError = `PAPER action: ${e.message}`;
       }
@@ -1201,7 +1228,7 @@ async function runCycle() {
 }
 
 async function boot() {
-  console.log(`GALAXI V27 | mode=${cfg.mode} | model=${cfg.openaiModel} | scan=${cfg.scanMs}ms | SIMPLE_POSITIONS=ON`);
+  console.log(`GALAXI V29 | mode=${cfg.mode} | model=${cfg.openaiModel} | scan=${cfg.scanMs}ms | SIMPLE_POSITIONS=ON`);
 
   console.log(`OPENAI_KEY_PRESENT=${cfg.openaiKey ? 1 : 0}`);
   console.log(`OPENAI_MODEL=${cfg.openaiModel}`);
