@@ -1,15 +1,13 @@
-GALAXI V22 - MOTOR DE UTILIDAD / GESTION ACTIVA
+GALAXI V23 MULTIUNIVERSE
 
-Reemplaza el index.js del proyecto por index.js de esta carpeta.
+Base: V22 UTILIDAD POSITIVA FIX.
 
-Cambios principales:
-- Objetivo explícito: maximizar PnL neto esperado y proteger equity.
-- La IA recibe PnL, mark, porcentaje no realizado y antigüedad de cada posición.
-- La IA puede decidir CLOSE en cada ciclo.
-- CLOSE se prioriza antes de nuevas entradas.
-- Las nuevas entradas requieren expected_net_pct >= MIN_EXPECTED_NET_PCT (default 0.20%).
-- HOLD solo se considera válido cuando la expectativa de mantener sigue siendo favorable.
-- No se obliga a llenar las posiciones.
-- Se mantiene PAPER por defecto; no activar LIVE hasta validar el comportamiento.
-
-No incluye ni solicita API keys. Las claves permanecen en Railway.
+Cambios:
+- Universo activo con monedas normales, memecoins y listados nuevos.
+- Clasificación por baseAsset y onboardDate de Binance.
+- Memecoins incluidas activamente sin obligar a gastar capital.
+- Listados de hasta 30 días incluidos activamente.
+- Selección diversificada para la IA: meme + nuevos + normales.
+- LONG y SHORT compiten en igualdad.
+- La IA sigue exigiendo expectativa neta positiva antes de abrir.
+- Se mantiene PAPER por defecto y los límites de riesgo.

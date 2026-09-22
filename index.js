@@ -33,7 +33,10 @@ const cfg = {
 
   scanMs: Math.max(15000, Number(process.env.SCAN_INTERVAL_MS || 20000)),
   aiTimeoutMs: Math.max(5000, Number(process.env.AI_TIMEOUT_MS || 15000)),
-  aiTopSymbols: Math.min(30, Math.max(8, Number(process.env.AI_TOP_SYMBOLS || 20))),
+  aiTopSymbols: Math.min(30, Math.max(12, Number(process.env.AI_TOP_SYMBOLS || 24))),
+  newListingDays: Math.max(1, Number(process.env.NEW_LISTING_DAYS || 30)),
+  memeSlots: Math.max(2, Number(process.env.MEME_SLOTS || 6)),
+  newSlots: Math.max(2, Number(process.env.NEW_LISTING_SLOTS || 6)),
   klineLimit: Math.min(150, Math.max(50, Number(process.env.KLINE_LIMIT || 80))),
   marketConcurrency: Math.min(8, Math.max(2, Number(process.env.MARKET_CONCURRENCY || 5))),
   restTimeoutMs: Math.max(5000, Number(process.env.REST_TIMEOUT_MS || 12000)),
@@ -214,12 +217,59 @@ async function loadExchangeInfo() {
     const lot = (s.filters || []).find(x => x.filterType === 'LOT_SIZE');
     const price = (s.filters || []).find(x => x.filterType === 'PRICE_FILTER');
     marketInfo.set(s.symbol, {
+      baseAsset: s.baseAsset || s.symbol.replace(/USDT$/, ''),
+      onboardDate: Number(s.onboardDate || 0),
       qtyStep: Number(lot?.stepSize || 0.001),
       minQty: Number(lot?.minQty || 0),
       tickSize: Number(price?.tickSize || 0.00001)
     });
   }
   state.symbols = marketInfo.size;
+}
+
+
+const MEME_ASSETS = new Set([
+  'DOGE','SHIB','PEPE','FLOKI','BONK','WIF','MEME','BOME','MEW','MOG','BRETT','TURBO',
+  'NEIRO','NEIROETH','DOGS','PNUT','ACT','POPCAT','1000SATS','1000RATS','1000BONK','1000FLOKI',
+  '1000PEPE','1000SHIB','1000CHEEMS','MOODENG','GOAT','PENGU','SPX','TRUMP','MELANIA','TOSHI'
+]);
+const MEME_HINTS = /(DOGE|SHIB|PEPE|FLOKI|BONK|WIF|MEME|BOME|MEW|MOG|BRETT|TURBO|NEIRO|DOGS|PNUT|POPCAT|SATS|RATS|CHEEMS|MOODENG|GOAT|PENGU|TRUMP|MELANIA|TOSHI)/i;
+
+function marketCategory(symbol) {
+  const m = marketInfo.get(symbol) || {};
+  const base = String(m.baseAsset || symbol.replace(/USDT$/, '')).toUpperCase();
+  const meme = MEME_ASSETS.has(base) || MEME_HINTS.test(base);
+  const ageMs = m.onboardDate > 0 ? now() - m.onboardDate : Infinity;
+  const isNew = ageMs >= 0 && ageMs <= cfg.newListingDays * 86400000;
+  if (meme && isNew) return 'NEW_MEME';
+  if (meme) return 'MEME';
+  if (isNew) return 'NEW';
+  return 'NORMAL';
+}
+
+function selectAICandidates() {
+  const all = [...ticks.entries()]
+    .filter(([s,t]) => marketInfo.has(s) && Number(t.price) > 0)
+    .map(([symbol,t]) => ({ symbol, t, category: marketCategory(symbol) }))
+    .sort((a,b) => Number(b.t.volume || 0) - Number(a.t.volume || 0));
+
+  const memes = all.filter(x => x.category === 'MEME' || x.category === 'NEW_MEME');
+  const fresh = all.filter(x => x.category === 'NEW' || x.category === 'NEW_MEME');
+  const normal = all.filter(x => x.category === 'NORMAL');
+  const selected = [];
+  const used = new Set();
+  const take = (arr, n) => {
+    for (const x of arr) {
+      if (selected.length >= cfg.aiTopSymbols || n <= 0) break;
+      if (used.has(x.symbol)) continue;
+      selected.push(x); used.add(x.symbol); n--;
+    }
+  };
+  take(memes, cfg.memeSlots);
+  take(fresh, cfg.newSlots);
+  take(normal, cfg.aiTopSymbols);
+  take(all, cfg.aiTopSymbols);
+  return selected.slice(0, cfg.aiTopSymbols).map(x => [x.symbol, x.t]);
 }
 
 function precisionFromStep(step) {
@@ -394,20 +444,13 @@ async function refreshPaperPrices() {
 }
 
 async function buildMarketSnapshot() {
-  let candidates = [...ticks.entries()]
-    .filter(([s, t]) => marketInfo.has(s) && Number(t.price) > 0)
-    .sort((a, b) => Number(b[1].volume || 0) - Number(a[1].volume || 0))
-    .slice(0, cfg.aiTopSymbols);
+  let candidates = selectAICandidates();
 
-  // If WS has connected but has not supplied ticker data, bootstrap from REST.
-  if (candidates.length < Math.min(5, cfg.aiTopSymbols)) {
+  if (candidates.length < Math.min(8, cfg.aiTopSymbols)) {
     try {
       const seeded = await seedTicksFromRest();
       if (seeded) {
-        candidates = [...ticks.entries()]
-          .filter(([s, t]) => marketInfo.has(s) && Number(t.price) > 0)
-          .sort((a, b) => Number(b[1].volume || 0) - Number(a[1].volume || 0))
-          .slice(0, cfg.aiTopSymbols);
+        candidates = selectAICandidates();
         console.log(`TICKER_REST_SEED=${seeded}`);
       }
     } catch (e) {
@@ -418,111 +461,38 @@ async function buildMarketSnapshot() {
   const rows = [];
   let errors = 0;
   const errorSamples = [];
-
-  // Keep concurrency bounded. This avoids a burst of 40 requests at once while
-  // still analysing the whole AI candidate set quickly.
   for (let i = 0; i < candidates.length; i += cfg.marketConcurrency) {
     const batch = candidates.slice(i, i + cfg.marketConcurrency);
     const results = await Promise.all(batch.map(async ([symbol]) => {
       try {
-        const [k1, k5] = await Promise.all([
-          fetchKlines(symbol, '1m'),
-          fetchKlines(symbol, '5m', 70)
-        ]);
+        const [k1, k5] = await Promise.all([fetchKlines(symbol, '1m'), fetchKlines(symbol, '5m', 70)]);
         if (!Array.isArray(k1) || k1.length < 35 || !Array.isArray(k5) || k5.length < 20) {
           throw new Error(`KLINE_INSUFFICIENT ${symbol} k1=${k1?.length || 0} k5=${k5?.length || 0}`);
         }
         const a = analyzeKlines(symbol, k1, k5);
-        return {
-          ...a,
-          quoteVolume24h: round(Number(ticks.get(symbol)?.volume || 0), 0)
-        };
+        return { ...a, category: marketCategory(symbol), quoteVolume24h: round(Number(ticks.get(symbol)?.volume || 0), 0) };
       } catch (e) {
         errors++;
         if (errorSamples.length < 3) errorSamples.push(`${symbol}: ${e.message}`);
         return null;
       }
     }));
-
     for (const r of results) if (r) rows.push(r);
   }
 
-  if (errors && !rows.length) {
-    state.lastError = `Mercado: 0/${candidates.length} analizados · ${errorSamples.join(' | ')}`;
-  } else if (errors) {
-    state.lastError = `Mercado: ${rows.length}/${candidates.length} analizados · fallos=${errors}`;
-  } else {
-    state.lastError = null;
-  }
+  if (errors && !rows.length) state.lastError = `Mercado: 0/${candidates.length} analizados · ${errorSamples.join(' | ')}`;
+  else if (errors) state.lastError = `Mercado: ${rows.length}/${candidates.length} analizados · fallos=${errors}`;
+  else state.lastError = null;
 
-  rows.sort((a, b) => {
-    const aAbs = Math.max(Math.abs(a.momentum5m), Math.abs(a.momentum15m));
-    const bAbs = Math.max(Math.abs(b.momentum5m), Math.abs(b.momentum15m));
-    return bAbs - aAbs;
+  rows.sort((a,b) => {
+    const aScore = Math.max(Math.abs(a.momentum5m), Math.abs(a.momentum15m), Math.abs(a.momentum30m)) * (1 + Math.min(3, a.volumeRatio || 1) * 0.15);
+    const bScore = Math.max(Math.abs(b.momentum5m), Math.abs(b.momentum15m), Math.abs(b.momentum30m)) * (1 + Math.min(3, b.volumeRatio || 1) * 0.15);
+    return bScore - aScore;
   });
 
   state.warmSymbols = rows.length;
-  state.ranking = rows.slice(0, 20);
-  state.candidates = rows.length;
-
-  const longN = rows.filter(x => x.bias === 'LONG').length;
-  const shortN = rows.filter(x => x.bias === 'SHORT').length;
-  state.longPct = rows.length ? Math.round(longN / rows.length * 100) : 50;
-  state.shortPct = 100 - state.longPct;
-
-  const avg15 = rows.length ? rows.reduce((s, x) => s + x.momentum15m, 0) / rows.length : 0;
-  state.regime =
-    state.longPct >= 62 && avg15 > 0 ? 'ALCISTA' :
-    state.shortPct >= 62 && avg15 < 0 ? 'BAJISTA' : 'MIXTO';
-
-  state.timeframes = {
-    '20s': 'tick',
-    '1m': avg(rows.map(x => x.momentum1m)),
-    '3m': avg(rows.map(x => x.momentum5m)),
-    '5m': avg(rows.map(x => x.momentum5mTF))
-  };
-
+  state.ranking = rows.slice(0, Math.min(30, rows.length));
   return rows;
-}
-
-function avg(a) {
-  if (!a.length) return '—';
-  const x = a.reduce((s, n) => s + Number(n || 0), 0) / a.length;
-  return `${x >= 0 ? '+' : ''}${x.toFixed(2)}%`;
-}
-
-function riskAllowsOpen(symbol, margin) {
-  if (stopped) return { ok: false, reason: 'STOP' };
-  if (state.positions.length >= cfg.maxPositions) return { ok: false, reason: 'MAX_POSITIONS' };
-
-  const totalMargin = state.positions.reduce((s, p) => s + Number(p.margin || 0), 0);
-  const maxTotal = state.equity * cfg.maxTotalMarginPct / 100;
-  if (totalMargin + margin > maxTotal) return { ok: false, reason: 'MAX_TOTAL_MARGIN' };
-
-  const dailyLoss = Math.max(0, -state.dailyLossPct);
-  if (dailyLoss >= cfg.maxDailyLossPct) return { ok: false, reason: 'DAILY_LOSS' };
-  if (state.drawdownPct >= cfg.maxDrawdownPct) return { ok: false, reason: 'MAX_DRAWDOWN' };
-
-  const cd = cooldown.get(symbol) || 0;
-  if (cd > now()) return { ok: false, reason: 'COOLDOWN' };
-
-  return { ok: true };
-}
-
-function marginFor() {
-  const equity = Math.max(0, Number(state.equity || cfg.capital));
-  const byPosition = equity * cfg.maxPositionMarginPct / 100;
-  const totalMax = equity * cfg.maxTotalMarginPct / 100;
-  const used = state.positions.reduce((s, p) => s + Number(p.margin || 0), 0);
-  return Math.max(0, Math.min(byPosition, totalMax - used));
-}
-
-function cleanJsonText(text) {
-  let s = String(text || '').trim();
-  if (s.startsWith('```')) s = s.replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
-  const a = s.indexOf('{');
-  const b = s.lastIndexOf('}');
-  return a >= 0 && b > a ? s.slice(a, b + 1) : s;
 }
 
 async function askAI(market, account) {
@@ -546,7 +516,13 @@ async function askAI(market, account) {
     shortPct: state.shortPct,
     equity: state.equity,
     positions,
-    market: market.slice(0, cfg.aiTopSymbols)
+    market: market.slice(0, cfg.aiTopSymbols),
+    universePolicy: {
+      normal: 'competencia abierta',
+      meme: 'incluidas activamente; no requieren cuota de capital',
+      newListings: `listados de hasta ${cfg.newListingDays} días incluidos activamente`,
+      selection: 'las oportunidades compiten por expectativa neta, liquidez, volatilidad y confirmación'
+    }
   };
 
   const instructions = `
@@ -555,6 +531,17 @@ Tu trabajo es analizar el snapshot y decidir qué hacer AHORA. No uses una regla
 Combina estructura de mercado, momentum multitemporal, RSI, EMA, ATR, volumen, rupturas,
 régimen y contexto de las posiciones existentes. Busca oportunidades LONG y SHORT y evita
 abrir repetidamente el mismo símbolo sin una nueva tesis.
+
+UNIVERSO DE OPORTUNIDADES:
+- No te limites a BTC/ETH ni a las monedas que hayan operado ciclos anteriores.
+- Considera simultáneamente monedas normales, altcoins, MEMECOINS y LISTADOS NUEVOS.
+- Los listados nuevos incluidos en market llevan category NEW o NEW_MEME. Evalúalos con
+  especial atención a liquidez, spread, volumen, volatilidad y calidad de datos.
+- Las memecoins llevan category MEME o NEW_MEME. No debes ignorarlas por ser memecoins,
+  pero tampoco debes abrirlas por ser memecoins: compiten por la misma expectativa neta.
+- LONG y SHORT deben competir en igualdad. Un régimen BAJISTA no obliga a abrir SHORT,
+  pero sí permite SHORT cuando exista una entrada confirmada; lo mismo para LONG.
+- Prioriza oportunidades con confirmación desde AHORA, no movimientos ya demasiado extendidos.
 
 OBJETIVO ECONÓMICO PRIORITARIO:
 - Tu objetivo es maximizar el PnL NETO esperado y proteger la equity.
