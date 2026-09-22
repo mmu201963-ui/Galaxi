@@ -50,9 +50,10 @@ const cfg = {
   maxPositionMarginPct: Math.min(5, Math.max(0.25, Number(process.env.MAX_POSITION_MARGIN_PCT || 2))),
   leverage: Math.min(10, Math.max(1, Number(process.env.LEVERAGE || 5))),
 
-  scanMs: Math.max(5000, Number(process.env.SCAN_INTERVAL_MS || 10000)),
+  scanMs: Math.max(2000, Number(process.env.SCAN_INTERVAL_MS || 2000)),
   fastScannerMs: Math.max(500, Number(process.env.FAST_SCANNER_MS || 1000)),
   fastHistoryMs: Math.max(3000, Number(process.env.FAST_HISTORY_MS || 8000)),
+  movementOnly: String(process.env.MOVEMENT_ONLY || 'true').toLowerCase() === 'true',
   btcReferenceSymbol: String(process.env.BTC_REFERENCE_SYMBOL || 'BTCUSDT').toUpperCase(),
   anomalyMinResidualPct: Math.max(0.02, Number(process.env.ANOMALY_MIN_RESIDUAL_PCT || 0.10)),
   anomalyStrongResidualPct: Math.max(0.05, Number(process.env.ANOMALY_STRONG_RESIDUAL_PCT || 0.25)),
@@ -83,7 +84,8 @@ const cfg = {
   estimatedFeeRate: Math.max(0.0001, Number(process.env.ESTIMATED_FEE_RATE || 0.0004)),
 
   maxDailyLossPct: Math.min(10, Math.max(0.25, Number(process.env.MAX_DAILY_LOSS_PCT || 1))),
-  maxCycleLossUsd: Math.max(8, Number(process.env.MAX_CYCLE_LOSS_USD || 24)),
+  maxCycleLossUsd: Infinity,
+  portfolioProfitTargetPct: Math.max(0.5, Number(process.env.PORTFOLIO_PROFIT_TARGET_PCT || 5)),
   maxDrawdownPct: Math.min(15, Math.max(1, Number(process.env.MAX_DRAWDOWN_PCT || 3))),
   minSecondsBetweenOrders: Math.max(2, Number(process.env.MIN_SECONDS_BETWEEN_ORDERS || 2)),
   maxActionsPerCycle: Math.min(12, Math.max(1, Number(process.env.MAX_ACTIONS_PER_CYCLE || 12))),
@@ -117,7 +119,7 @@ function dashboardHtml() {
   const e = state.edgeScanner || {};
   const fmt = x => x == null ? '—' : Number(x).toFixed(2);
   const topRows = (Array.isArray(state.ranking) ? state.ranking.slice(0, 8) : []).map(x => `<tr><td>${htmlEscape(x.symbol)}</td><td>${htmlEscape(x.preferredSide || '—')}</td><td>${fmt(x.edgeScore)}</td><td>${fmt(x.edgeLong)}</td><td>${fmt(x.edgeShort)}</td><td>${htmlEscape(x.behavior?.side || 'MIXTO')}</td><td>${fmt(x.premium?.fundingRatePct)}%</td><td>${fmt(x.openInterestChangePct)}%</td></tr>`).join('');
-  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GALAXI V38 · ANOMALY ENGINE · 12 POSITIONS · 6 LONG / 6 SHORT</title><meta http-equiv="refresh" content="10"><style>body{font-family:system-ui;background:#080b10;color:#eee;margin:0;padding:18px}main{max-width:1100px;margin:auto}.top{display:flex;justify-content:space-between;gap:12px;align-items:end;margin-bottom:16px}.sub{color:#8b949e}.pill{border:1px solid #2f81f7;border-radius:999px;padding:5px 10px;color:#58a6ff;font-size:12px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px}.card{background:#11161d;border:1px solid #252d38;border-radius:12px;padding:14px}.k{color:#8b949e;font-size:12px}.v{font-size:22px;font-weight:750;margin-top:5px}.section{margin-top:18px}.scanner{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px}.edge{background:#0f151c;border:1px solid #26303c;border-radius:12px;padding:14px}.edge b{font-size:20px}.muted{color:#8b949e;font-size:12px}.good{color:#3fb950}.warn{color:#d29922}table{width:100%;border-collapse:collapse;margin-top:10px;background:#11161d;border:1px solid #252d38;border-radius:12px;overflow:hidden}th,td{text-align:left;padding:9px;border-bottom:1px solid #252d38;font-size:13px}a{color:#58a6ff}.tag{display:inline-block;padding:2px 7px;border-radius:999px;background:#1b2330;color:#c9d1d9;font-size:11px;margin-right:4px}</style></head><body><main><div class="top"><div><h1 style="margin:0">GALAXI V38 · ANOMALY ENGINE · 12 POSITIONS · 6 LONG / 6 SHORT</h1><div class="sub">${htmlEscape(state.mode)} · IA ${htmlEscape(state.aiModel)} · ciclo ${state.cycle}</div></div><span class="pill">${state.wsConnected ? 'BINANCE LIVE DATA' : 'BINANCE DESCONECTADO'}</span></div><div class="grid"><div class="card"><div class="k">Equity</div><div class="v">$${Number(state.equity).toFixed(2)}</div></div><div class="card"><div class="k">Net PnL</div><div class="v">$${Number(state.realizedPnl + state.unrealizedPnl).toFixed(2)}</div></div><div class="card"><div class="k">Mercados</div><div class="v">${state.symbols}</div></div><div class="card"><div class="k">Deep / IA</div><div class="v">${state.deepScanned} / ${state.candidates}</div></div><div class="card"><div class="k">IA calls / errores</div><div class="v">${state.aiCalls} / ${state.aiErrors}</div></div><div class="card"><div class="k">Top Trader coverage</div><div class="v">${state.behaviorCoverage}%</div></div><div class="card"><div class="k">Edge tradeable</div><div class="v">${e.tradeableCount || 0}</div></div><div class="card"><div class="k">Posiciones</div><div class="v">${positions.length} · L${state.longOpen}/S${state.shortOpen}</div></div><div class="card"><div class="k">FAST SCANNER</div><div class="v">${state.fastScanner?.scanned || 0}/s</div><div class="muted">señales ${state.fastScanner?.freshSignals || 0} · Spot ${state.fastScanner?.spotConnected ? 'OK' : '—'}</div></div><div class="card"><div class="k">BTC ANOMALY ENGINE</div><div class="v">${state.anomalyScanner?.anomalous || 0}</div><div class="muted">residuales · BTC ${fmt(state.anomalyScanner?.btcMovePct)}%</div></div></div><div class="section"><div class="card"><div class="k">P&L AUDIT · TP / HARD LOSS</div><div class="v">+$${Number(state.paperProfitTakeUsd ?? cfg.paperProfitTakeUsd).toFixed(2)} / -$${Number(state.paperHardLossUsd ?? cfg.paperHardLossUsd).toFixed(2)}</div><div class="muted">Realizado $${Number(state.realizedPnl||0).toFixed(2)} · No realizado $${Number(state.unrealizedPnl||0).toFixed(2)} · discrepancia $${Number(state.pnlAudit?.discrepancy||0).toFixed(4)}</div></div></div><div class="section"><h2>FAST MISPRICING SCANNER</h2><div class="card"><div class="muted">VIGILANCIA CONTINUA</div><b>${state.fastScanner?.scanned || 0} mercados/s</b><div class="muted">Señales frescas ${state.fastScanner?.freshSignals || 0} · Spot ${state.fastScanner?.spotConnected ? 'CONECTADO' : 'DESCONECTADO'}</div><div class="muted">Mejor ${htmlEscape(state.fastScanner?.bestOverall?.symbol || '—')} ${htmlEscape(state.fastScanner?.bestOverall?.side || '')} · score ${fmt(state.fastScanner?.bestOverall?.score)}</div></div></div><div class="section"><h2>BTC-RELATIVE ANOMALY ENGINE</h2><div class="card"><div class="muted">REFERENCIA ${htmlEscape(cfg.btcReferenceSymbol)}</div><b>${state.anomalyScanner?.anomalous || 0} anomalías frescas</b><div class="muted">BTC ${fmt(state.anomalyScanner?.btcMovePct)}% · mejor ${htmlEscape(state.anomalyScanner?.bestOverall?.symbol || "—")} · score ${fmt(state.anomalyScanner?.bestOverall?.anomalyScore)}</div><div class="muted">Residual ${fmt(state.anomalyScanner?.bestOverall?.btcRelativeResidualPct)}% · velocidad relativa ${fmt(state.anomalyScanner?.bestOverall?.btcRelativeVelocityPctPerMin)}%/min</div></div></div><div class="section"><h2>EDGE SCANNER</h2><div class="scanner"><div class="edge"><div class="muted">MEJOR LONG</div><b>${htmlEscape(e.bestLong?.symbol || '—')}</b><div>Score <span class="good">${fmt(e.bestLong?.score)}</span></div><div class="muted">Trader ${htmlEscape(e.bestLong?.behavior || '—')} · funding ${fmt(e.bestLong?.funding)}% · basis ${fmt(e.bestLong?.basis)}%</div></div><div class="edge"><div class="muted">MEJOR SHORT</div><b>${htmlEscape(e.bestShort?.symbol || '—')}</b><div>Score <span class="good">${fmt(e.bestShort?.score)}</span></div><div class="muted">Trader ${htmlEscape(e.bestShort?.behavior || '—')} · funding ${fmt(e.bestShort?.funding)}% · basis ${fmt(e.bestShort?.basis)}%</div></div><div class="edge"><div class="muted">MEJOR OPORTUNIDAD</div><b>${htmlEscape(e.bestOverall?.symbol || '—')} ${htmlEscape(e.bestOverall?.side || '')}</b><div>Score <span class="good">${fmt(e.bestOverall?.score)}</span></div><div class="muted">Observados ${e.watchedCount || 0} · promedio ${fmt(e.avgEdge)}</div></div></div></div><div class="section"><h2>EDGE LEADERBOARD</h2><table><thead><tr><th>Símbolo</th><th>Sesgo</th><th>Edge</th><th>Long</th><th>Short</th><th>Top Trader</th><th>Funding</th><th>OI 5m</th></tr></thead><tbody>${topRows || '<tr><td colspan=8>Esperando scanner</td></tr>'}</tbody></table></div><div class="section"><h2>Posiciones</h2><table><thead><tr><th>Símbolo</th><th>Lado</th><th>Entrada</th><th>Mark</th><th>PnL</th><th>Pico</th><th>Edad</th></tr></thead><tbody>${rows || '<tr><td colspan=7>Sin posiciones abiertas</td></tr>'}</tbody></table></div><div class="section muted">Régimen: <span class="tag">${htmlEscape(state.regime)}</span> Comportamiento: <span class="tag">${htmlEscape(state.behaviorBias)}</span> · Confianza ${state.behaviorConfidence}% · <a href="/health">health</a> · <a href="/state">state</a></div></main></body></html>`;
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GALAXI V38 · ANOMALY ENGINE · 12 POSITIONS · 6 LONG / 6 SHORT</title><meta http-equiv="refresh" content="1"><style>body{font-family:system-ui;background:#080b10;color:#eee;margin:0;padding:18px}main{max-width:1100px;margin:auto}.top{display:flex;justify-content:space-between;gap:12px;align-items:end;margin-bottom:16px}.sub{color:#8b949e}.pill{border:1px solid #2f81f7;border-radius:999px;padding:5px 10px;color:#58a6ff;font-size:12px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px}.card{background:#11161d;border:1px solid #252d38;border-radius:12px;padding:14px}.k{color:#8b949e;font-size:12px}.v{font-size:22px;font-weight:750;margin-top:5px}.section{margin-top:18px}.scanner{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px}.edge{background:#0f151c;border:1px solid #26303c;border-radius:12px;padding:14px}.edge b{font-size:20px}.muted{color:#8b949e;font-size:12px}.good{color:#3fb950}.warn{color:#d29922}table{width:100%;border-collapse:collapse;margin-top:10px;background:#11161d;border:1px solid #252d38;border-radius:12px;overflow:hidden}th,td{text-align:left;padding:9px;border-bottom:1px solid #252d38;font-size:13px}a{color:#58a6ff}.tag{display:inline-block;padding:2px 7px;border-radius:999px;background:#1b2330;color:#c9d1d9;font-size:11px;margin-right:4px}</style></head><body><main><div class="top"><div><h1 style="margin:0">GALAXI V38 · ANOMALY ENGINE · 12 POSITIONS · 6 LONG / 6 SHORT</h1><div class="sub">${htmlEscape(state.mode)} · ${cfg.movementOnly ? 'MOVEMENT ONLY' : 'IA ' + htmlEscape(state.aiModel)} · ciclo ${state.cycle}</div></div><span class="pill">${state.wsConnected ? 'BINANCE LIVE DATA' : 'BINANCE DESCONECTADO'}</span></div><div class="grid"><div class="card"><div class="k">Equity</div><div class="v">$${Number(state.equity).toFixed(2)}</div></div><div class="card"><div class="k">Net PnL</div><div class="v">$${Number(state.realizedPnl + state.unrealizedPnl).toFixed(2)}</div></div><div class="card"><div class="k">OBJETIVO GLOBAL</div><div class="v">+${cfg.portfolioProfitTargetPct.toFixed(1)}%</div><div class="muted">$${Number(state.profitTargetEquity || 0).toFixed(2)} · resets ${Number(state.profitTargetHits || 0)}</div></div><div class="card"><div class="k">Mercados</div><div class="v">${state.symbols}</div></div><div class="card"><div class="k">Deep / IA</div><div class="v">${state.deepScanned} / ${state.candidates}</div></div><div class="card"><div class="k">IA calls / errores</div><div class="v">${state.aiCalls} / ${state.aiErrors}</div></div><div class="card"><div class="k">Top Trader coverage</div><div class="v">${state.behaviorCoverage}%</div></div><div class="card"><div class="k">Edge tradeable</div><div class="v">${e.tradeableCount || 0}</div></div><div class="card"><div class="k">Posiciones</div><div class="v">${positions.length} · L${state.longOpen}/S${state.shortOpen}</div></div><div class="card"><div class="k">FAST SCANNER</div><div class="v">${state.fastScanner?.scanned || 0}/s</div><div class="muted">señales ${state.fastScanner?.freshSignals || 0} · Spot ${state.fastScanner?.spotConnected ? 'OK' : '—'}</div></div><div class="card"><div class="k">BTC ANOMALY ENGINE</div><div class="v">${state.anomalyScanner?.anomalous || 0}</div><div class="muted">residuales · BTC ${fmt(state.anomalyScanner?.btcMovePct)}%</div></div></div><div class="section"><div class="card"><div class="k">P&L AUDIT · TP / HARD LOSS</div><div class="v">+$${Number(state.paperProfitTakeUsd ?? cfg.paperProfitTakeUsd).toFixed(2)} / -$${Number(state.paperHardLossUsd ?? cfg.paperHardLossUsd).toFixed(2)}</div><div class="muted">Realizado $${Number(state.realizedPnl||0).toFixed(2)} · No realizado $${Number(state.unrealizedPnl||0).toFixed(2)} · discrepancia $${Number(state.pnlAudit?.discrepancy||0).toFixed(4)}</div></div></div><div class="section"><h2>FAST MISPRICING SCANNER</h2><div class="card"><div class="muted">VIGILANCIA CONTINUA</div><b>${state.fastScanner?.scanned || 0} mercados/s</b><div class="muted">Señales frescas ${state.fastScanner?.freshSignals || 0} · Spot ${state.fastScanner?.spotConnected ? 'CONECTADO' : 'DESCONECTADO'}</div><div class="muted">Mejor ${htmlEscape(state.fastScanner?.bestOverall?.symbol || '—')} ${htmlEscape(state.fastScanner?.bestOverall?.side || '')} · velocidad ${fmt(state.fastScanner?.bestOverall?.velocity)}%/min</div><div class="muted">LONG: ${htmlEscape((state.fastScanner?.movementLong || []).slice(0,5).map(x=>x.symbol).join(' · ') || '—')}</div><div class="muted">SHORT: ${htmlEscape((state.fastScanner?.movementShort || []).slice(0,5).map(x=>x.symbol).join(' · ') || '—')}</div></div></div><div class="section"><h2>BTC-RELATIVE ANOMALY ENGINE</h2><div class="card"><div class="muted">REFERENCIA ${htmlEscape(cfg.btcReferenceSymbol)}</div><b>${state.anomalyScanner?.anomalous || 0} anomalías frescas</b><div class="muted">BTC ${fmt(state.anomalyScanner?.btcMovePct)}% · mejor ${htmlEscape(state.anomalyScanner?.bestOverall?.symbol || "—")} · score ${fmt(state.anomalyScanner?.bestOverall?.anomalyScore)}</div><div class="muted">Residual ${fmt(state.anomalyScanner?.bestOverall?.btcRelativeResidualPct)}% · velocidad relativa ${fmt(state.anomalyScanner?.bestOverall?.btcRelativeVelocityPctPerMin)}%/min</div></div></div><div class="section"><h2>EDGE SCANNER</h2><div class="scanner"><div class="edge"><div class="muted">MEJOR LONG</div><b>${htmlEscape(e.bestLong?.symbol || '—')}</b><div>Score <span class="good">${fmt(e.bestLong?.score)}</span></div><div class="muted">Trader ${htmlEscape(e.bestLong?.behavior || '—')} · funding ${fmt(e.bestLong?.funding)}% · basis ${fmt(e.bestLong?.basis)}%</div></div><div class="edge"><div class="muted">MEJOR SHORT</div><b>${htmlEscape(e.bestShort?.symbol || '—')}</b><div>Score <span class="good">${fmt(e.bestShort?.score)}</span></div><div class="muted">Trader ${htmlEscape(e.bestShort?.behavior || '—')} · funding ${fmt(e.bestShort?.funding)}% · basis ${fmt(e.bestShort?.basis)}%</div></div><div class="edge"><div class="muted">MEJOR OPORTUNIDAD</div><b>${htmlEscape(e.bestOverall?.symbol || '—')} ${htmlEscape(e.bestOverall?.side || '')}</b><div>Score <span class="good">${fmt(e.bestOverall?.score)}</span></div><div class="muted">Observados ${e.watchedCount || 0} · promedio ${fmt(e.avgEdge)}</div></div></div></div><div class="section"><h2>EDGE LEADERBOARD</h2><table><thead><tr><th>Símbolo</th><th>Sesgo</th><th>Edge</th><th>Long</th><th>Short</th><th>Top Trader</th><th>Funding</th><th>OI 5m</th></tr></thead><tbody>${topRows || '<tr><td colspan=8>Esperando scanner</td></tr>'}</tbody></table></div><div class="section"><h2>Posiciones</h2><table><thead><tr><th>Símbolo</th><th>Lado</th><th>Entrada</th><th>Mark</th><th>PnL</th><th>Pico</th><th>Edad</th></tr></thead><tbody>${rows || '<tr><td colspan=7>Sin posiciones abiertas</td></tr>'}</tbody></table></div><div class="section muted">Régimen: <span class="tag">${htmlEscape(state.regime)}</span> Comportamiento: <span class="tag">${htmlEscape(state.behaviorBias)}</span> · Confianza ${state.behaviorConfidence}% · <a href="/health">health</a> · <a href="/state">state</a></div></main></body></html>`;
 }
 
 const webServer = http.createServer((req, res) => {
@@ -168,6 +170,10 @@ const state = {
   cycle: 0,
   cycleRealizedStart: 0,
   cycleLossUsd: 0,
+  profitTargetBaseline: cfg.capital,
+  profitTargetEquity: cfg.capital * (1 + cfg.portfolioProfitTargetPct / 100),
+  profitTargetHits: 0,
+  profitResetting: false,
   wsConnected: 0,
   spotConnected: 0,
   candidates: 0,
@@ -184,6 +190,8 @@ const state = {
   behaviorConfidence: 0,
 
   fastScanner: {
+    scanCount: 0,
+    scanDurationMs: 0,
     scanned: 0,
     freshSignals: 0,
     spotConnected: 0,
@@ -192,7 +200,9 @@ const state = {
     bestOverall: null,
     btcMovePct: 0,
     btcVelocityPctPerMin: 0,
-    lastScanMs: 0
+    lastScanMs: 0,
+    movementLong: [],
+    movementShort: []
   },
 
   anomalyScanner: {
@@ -904,8 +914,9 @@ function mispricingScore(metrics, premium, side) {
 }
 
 function runFastScanner() {
-  if (fastLoopBusy || stopped) return;
+  if (fastLoopBusy) return;
   fastLoopBusy = true;
+  const scanStarted = now();
   try {
     const rows = [];
     // Establish the BTC reference first so every symbol is measured against
@@ -925,12 +936,24 @@ function runFastScanner() {
     }
 
     rows.sort((a, b) => (b.anomalyScore + b.mispricingScore) - (a.anomalyScore + a.mispricingScore));
-    const fresh = rows.filter(x => x.anomalyFresh || (x.mispricingScore >= 12 && Math.abs(x.velocityPctPerMin) >= 0.08)).slice(0, 16);
-    const bestLong = [...rows].sort((a,b) => (b.mispricingLong + b.anomalyScore * 0.35) - (a.mispricingLong + a.anomalyScore * 0.35))[0] || null;
-    const bestShort = [...rows].sort((a,b) => (b.mispricingShort + b.anomalyScore * 0.35) - (a.mispricingShort + a.anomalyScore * 0.35))[0] || null;
-    const bestOverall = rows[0] || null;
+    // Movement-only mode: the scanner does NOT require anomaly/edge thresholds.
+    // Direction comes directly from short-window price velocity.
+    const movementLong = [...rows].filter(x => Number(x.velocityPctPerMin) > 0)
+      .sort((a,b) => Number(b.velocityPctPerMin) - Number(a.velocityPctPerMin)).slice(0, 12);
+    const movementShort = [...rows].filter(x => Number(x.velocityPctPerMin) < 0)
+      .sort((a,b) => Number(a.velocityPctPerMin) - Number(b.velocityPctPerMin)).slice(0, 12);
+    const fresh = cfg.movementOnly
+      ? [...movementLong, ...movementShort].slice(0, 24)
+      : rows.filter(x => x.anomalyFresh || (x.mispricingScore >= 12 && Math.abs(x.velocityPctPerMin) >= 0.08)).slice(0, 16);
+    const bestLong = cfg.movementOnly ? movementLong[0] || null : [...rows].sort((a,b) => (b.mispricingLong + b.anomalyScore * 0.35) - (a.mispricingLong + a.anomalyScore * 0.35))[0] || null;
+    const bestShort = cfg.movementOnly ? movementShort[0] || null : [...rows].sort((a,b) => (b.mispricingShort + b.anomalyScore * 0.35) - (a.mispricingShort + a.anomalyScore * 0.35))[0] || null;
+    const bestOverall = cfg.movementOnly
+      ? [...movementLong, ...movementShort].sort((a,b) => Math.abs(Number(b.velocityPctPerMin)) - Math.abs(Number(a.velocityPctPerMin)))[0] || null
+      : rows[0] || null;
 
     state.fastScanner = {
+      scanCount: Number(state.fastScanner?.scanCount || 0) + 1,
+      scanDurationMs: now() - scanStarted,
       scanned: rows.length,
       freshSignals: fresh.length,
       spotConnected: state.spotConnected ? 1 : 0,
@@ -939,7 +962,9 @@ function runFastScanner() {
       bestLong: bestLong ? {symbol: bestLong.symbol, score: bestLong.mispricingLong, anomaly: bestLong.anomalyScore, residual: bestLong.btcRelativeResidualPct, basis: bestLong.crossBasisPct, velocity: bestLong.velocityPctPerMin} : null,
       bestShort: bestShort ? {symbol: bestShort.symbol, score: bestShort.mispricingShort, anomaly: bestShort.anomalyScore, residual: bestShort.btcRelativeResidualPct, basis: bestShort.crossBasisPct, velocity: bestShort.velocityPctPerMin} : null,
       bestOverall: bestOverall ? {symbol: bestOverall.symbol, side: bestOverall.relativeSide, score: bestOverall.mispricingScore, anomaly: bestOverall.anomalyScore, residual: bestOverall.btcRelativeResidualPct, basis: bestOverall.crossBasisPct, velocity: bestOverall.velocityPctPerMin} : null,
-      lastScanMs: now()
+      lastScanMs: now(),
+      movementLong: movementLong.slice(0, 12).map(x => ({symbol:x.symbol, velocity:x.velocityPctPerMin, move:x.movePct, side:'LONG'})),
+      movementShort: movementShort.slice(0, 12).map(x => ({symbol:x.symbol, velocity:x.velocityPctPerMin, move:x.movePct, side:'SHORT'}))
     };
 
     state.anomalyScanner = {
@@ -1291,7 +1316,7 @@ function learnFromTrade(position, exitReason) {
 }
 
 function riskAllowsOpen(symbol, margin, side) {
-  if (stopped) return { ok: false, reason: 'STOP' };
+  if (stopped) return { ok: false, reason: 'MANUAL_STOP' };
   if (state.positions.length >= cfg.maxPositions) return { ok: false, reason: 'MAX_POSITIONS' };
 
   // Portfolio capacity is strict: max 6 LONG + max 6 SHORT = 12 total.
@@ -1311,11 +1336,6 @@ function riskAllowsOpen(symbol, margin, side) {
   const equityDrawdownPct = Math.max(0, (cfg.capital - Number(state.equity || cfg.capital)) / cfg.capital * 100);
   if (realizedLossPct >= cfg.maxDailyLossPct) {
     return { ok: false, reason: 'DAILY_LOSS' };
-  }
-
-  const cycleLossSoFar = Number(state.cycleRealizedStart || state.realizedPnl) - Number(state.realizedPnl || 0);
-  if (cycleLossSoFar >= cfg.maxCycleLossUsd) {
-    return { ok: false, reason: 'CYCLE_LOSS_GUARD' };
   }
 
   if (equityDrawdownPct >= cfg.maxDrawdownPct) {
@@ -1696,8 +1716,10 @@ function validateAndRankActions(decision, market) {
     const expected = Number(a.expected_net_pct || 0);
     const confidence = clamp(Number(a.confidence || 0), 0, 1);
 
-    if (expected < cfg.minExpectedNetPct) continue;
-    if (confidence < 0.55) continue;
+    if (!cfg.movementOnly) {
+      if (expected < cfg.minExpectedNetPct) continue;
+      if (confidence < 0.55) continue;
+    }
 
     const side = action === 'OPEN_LONG' ? 'LONG' : 'SHORT';
     const marginPct = clamp(Number(a.margin_pct || 1), 0.25, cfg.maxPositionMarginPct);
@@ -1716,7 +1738,7 @@ function validateAndRankActions(decision, market) {
       learned.usable ? clamp(learned.avgNetPct * 0.20, -0.15, 0.15) : 0;
 
     // A historically weak pattern must clear a slightly higher hurdle.
-    if (learned.usable && learned.avgNetPct < 0 && expected + learningAdjustment < cfg.minExpectedNetPct + 0.05) {
+    if (!cfg.movementOnly && learned.usable && learned.avgNetPct < 0 && expected + learningAdjustment < cfg.minExpectedNetPct + 0.05) {
       continue;
     }
 
@@ -1860,6 +1882,74 @@ function paperClose(a, reasonOverride = null) {
   return { closed: true };
 }
 
+function updateProfitTarget() {
+  const baseline = Number(state.profitTargetBaseline || cfg.capital);
+  const target = baseline * (1 + cfg.portfolioProfitTargetPct / 100);
+  state.profitTargetBaseline = baseline;
+  state.profitTargetEquity = target;
+  return { baseline, target };
+}
+
+async function closeAllForProfitReset(reason = 'PORTFOLIO_PROFIT_5PCT') {
+  if (state.profitResetting) return false;
+  if (!state.positions.length) {
+    state.profitTargetBaseline = Number(state.equity || cfg.capital);
+    updateProfitTarget();
+    state.profitTargetHits = Number(state.profitTargetHits || 0) + 1;
+    state.lastSignal = `OBJETIVO +${cfg.portfolioProfitTargetPct.toFixed(2)}% · sin posiciones · reiniciando`;
+    return true;
+  }
+
+  state.profitResetting = true;
+  try {
+    const before = Number(state.equity || cfg.capital);
+    if (cfg.mode === 'PAPER') {
+      const snapshot = state.positions.map(p => ({ symbol: p.symbol, side: p.side }));
+      for (const p of snapshot) {
+        try { paperClose({ symbol: p.symbol, reason }, reason); }
+        catch (e) { state.lastError = `PROFIT RESET CLOSE: ${e.message}`; }
+      }
+    } else if (cfg.mode === 'LIVE' && cfg.liveArmed) {
+      for (const p of [...state.positions]) {
+        try { await executeLiveAction({ action: 'CLOSE', symbol: p.symbol, reason }, null); }
+        catch (e) {
+          state.lastError = `LIVE PROFIT RESET CLOSE ${p.symbol}: ${e.message}`;
+          pushHistory({ action: 'LIVE_ERROR', symbol: p.symbol, reason: e.message });
+        }
+      }
+      try {
+        lastAccount = await getLiveAccount();
+        state.equity = lastAccount.equity;
+        state.unrealizedPnl = lastAccount.unrealizedPnl;
+        state.positions = lastAccount.positions;
+      } catch {}
+    }
+
+    writeState();
+    const after = Number(state.equity || cfg.capital);
+    state.profitTargetHits = Number(state.profitTargetHits || 0) + 1;
+    // Compound the target: after closing the basket, the next 5% is measured
+    // from the new equity, not from the original capital.
+    state.profitTargetBaseline = after;
+    updateProfitTarget();
+    state.profitResetting = false;
+    state.lastSignal = `OBJETIVO +${cfg.portfolioProfitTargetPct.toFixed(2)}% ALCANZADO · ${snapshotSafeCount()} posiciones cerradas · NUEVO CICLO`;
+    pushHistory({ action: 'PORTFOLIO_RESET', reason, equityBefore: round(before, 2), equityAfter: round(after, 2), nextTarget: round(state.profitTargetEquity, 2) });
+    return true;
+  } finally {
+    state.profitResetting = false;
+  }
+}
+
+function snapshotSafeCount() {
+  return Number(state.positions?.length || 0);
+}
+
+function profitTargetReached() {
+  const target = Number(state.profitTargetEquity || 0);
+  return target > 0 && Number(state.equity || 0) >= target;
+}
+
 function markPaperPositions(market) {
   const keep = [];
   const tNow = now();
@@ -1928,8 +2018,9 @@ function emergencyStopCheck() {
     state.drawdownPct >= cfg.maxDrawdownPct ||
     Math.max(0, -state.dailyLossPct) >= cfg.maxDailyLossPct
   ) {
-    stopped = true;
-    state.lastSignal = 'STOP AUTOMÁTICO POR RIESGO';
+    // Risk limits block NEW entries in riskAllowsOpen(), but they no longer
+    // freeze the market scanner or position management.
+    state.lastSignal = 'ENTRADAS PAUSADAS POR RIESGO · SCANNER ACTIVO';
   }
 }
 
@@ -2231,6 +2322,44 @@ function connect() {
   }
 }
 
+
+function buildMovementDecision() {
+  const longOpen = state.positions.filter(p => p.side === 'LONG').length;
+  const shortOpen = state.positions.filter(p => p.side === 'SHORT').length;
+  const longRoom = Math.max(0, cfg.maxLongPositions - longOpen);
+  const shortRoom = Math.max(0, cfg.maxShortPositions - shortOpen);
+  const occupied = new Set(state.positions.map(p => p.symbol));
+  const actions = [];
+
+  const longs = (state.fastScanner?.movementLong || [])
+    .filter(x => !occupied.has(x.symbol) && Number(x.velocity) > 0)
+    .slice(0, longRoom);
+  const shorts = (state.fastScanner?.movementShort || [])
+    .filter(x => !occupied.has(x.symbol) && Number(x.velocity) < 0)
+    .slice(0, shortRoom);
+
+  for (const x of longs) {
+    actions.push({
+      action: 'OPEN_LONG', symbol: x.symbol, confidence: 1,
+      expected_net_pct: Math.abs(Number(x.velocity || 0)), margin_pct: 1,
+      reason: `MOVEMENT_ONLY LONG · velocidad ${Number(x.velocity).toFixed(4)}%/min · movimiento ${Number(x.move).toFixed(4)}%`
+    });
+  }
+  for (const x of shorts) {
+    actions.push({
+      action: 'OPEN_SHORT', symbol: x.symbol, confidence: 1,
+      expected_net_pct: Math.abs(Number(x.velocity || 0)), margin_pct: 1,
+      reason: `MOVEMENT_ONLY SHORT · velocidad ${Number(x.velocity).toFixed(4)}%/min · movimiento ${Number(x.move).toFixed(4)}%`
+    });
+  }
+
+  return {
+    summary: `MOVEMENT ONLY · ${actions.length} decisiones · LONG ${longs.length} / SHORT ${shorts.length}`,
+    regime: state.regime,
+    actions
+  };
+}
+
 async function runCycle() {
   if (loopBusy || stopped) return;
   loopBusy = true;
@@ -2247,8 +2376,9 @@ async function runCycle() {
       return;
     }
 
-    state.lastSignal =
-      `MERCADO COMPLETO ${state.symbols} · descubriendo oportunidades…`;
+    state.lastSignal = cfg.movementOnly
+      ? `MOVEMENT ONLY · escaneando ${state.symbols} mercados por velocidad…`
+      : `MERCADO COMPLETO ${state.symbols} · descubriendo oportunidades…`;
 
     const market = await buildMarketSnapshot();
 
@@ -2272,22 +2402,30 @@ async function runCycle() {
       }
     }
 
+    // Global basket target: when equity reaches +5% from the current
+    // baseline, close the entire basket and start a new compounded cycle.
+    if (profitTargetReached()) {
+      await closeAllForProfitReset();
+      writeState();
+      return;
+    }
+
     const account =
       cfg.mode === 'LIVE'
         ? (lastAccount || await getLiveAccount())
         : paperAccount();
 
-    const decision = await askAI(market, account);
+    const decision = cfg.movementOnly
+      ? buildMovementDecision()
+      : await askAI(market, account);
     await executeDecision(decision, market);
 
     const cycleLoss = cycleRealizedStart - state.realizedPnl;
     state.cycleLossUsd = round(Math.max(0, cycleLoss), 2);
-    if (cycleLoss >= cfg.maxCycleLossUsd) {
-      stopped = true;
-      state.lastSignal = `STOP: pérdida de ciclo $${cycleLoss.toFixed(2)} >= $${cfg.maxCycleLossUsd.toFixed(2)}`;
-    }
 
-    state.lastSignal = decision.summary || 'IA evaluó el mercado';
+    // A cycle loss is recorded for diagnostics only. It never freezes the
+    // scanner or the process; only the entry risk gates can pause new entries.
+    state.lastSignal = decision.summary || 'MOVEMENT ONLY evaluó el mercado';
 
     if (state.cycle % 5 === 0) {
       console.log(
@@ -2329,7 +2467,9 @@ async function boot() {
     ` | deep=${cfg.deepScanSymbols}` +
     ` | ai=${cfg.aiTopSymbols}` +
     ` | slots=12 independiente` +
-    ` | fast=${cfg.fastScannerMs}ms`
+    ` | fast=${cfg.fastScannerMs}ms` +
+    ` | target=+${cfg.portfolioProfitTargetPct}%` +
+    ` | cycleLossStop=OFF`
   );
 
   loadControl();
