@@ -52,3 +52,12 @@ ANOMALY_MIN_RESIDUAL_PCT=0.10
 ANOMALY_STRONG_RESIDUAL_PCT=0.25
 ANOMALY_STALE_MS=3000
 ANOMALY_SCORE_WEIGHT=0.55
+
+
+V38.1 MOVEMENT ONLY
+- MOVEMENT_ONLY=true makes the fast scanner the decision engine.
+- No anomaly score, expected-net, confidence, learning, funding, OI, or Top-Trader filter is required for OPEN decisions.
+- Direction is taken directly from short-window Binance price velocity: positive = LONG, negative = SHORT.
+- Scanner refreshes every ~1s and the dashboard refreshes every 1s.
+- Portfolio/risk limits, cooldowns, TP/SL, hard-loss, timeout and daily/cycle risk stops remain active.
+- PAPER remains the default.
