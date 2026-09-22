@@ -4,7 +4,7 @@ import http from 'node:http';
 import WebSocket from 'ws';
 
 /*
- GALAXI V32 · BEHAVIORAL ENGINE
+ GALAXI V33 · EDGE BEHAVIORAL ENGINE
 
  Objective:
  - Scan the complete Binance USDⓈ-M perpetual USDT universe.
@@ -62,6 +62,7 @@ const cfg = {
   klineLimit: Math.min(150, Math.max(50, Number(process.env.KLINE_LIMIT || 80))),
   marketConcurrency: Math.min(8, Math.max(2, Number(process.env.MARKET_CONCURRENCY || 5))),
   behaviorConcurrency: Math.min(8, Math.max(2, Number(process.env.BEHAVIOR_CONCURRENCY || 6))),
+  edgeCacheMs: Math.max(10000, Number(process.env.EDGE_CACHE_MS || 30000)),
   restTimeoutMs: Math.max(5000, Number(process.env.REST_TIMEOUT_MS || 12000)),
 
   // Expected net edge after estimated round-trip fees.
@@ -93,8 +94,11 @@ function htmlEscape(value) {
 
 function dashboardHtml() {
   const positions = Array.isArray(state.positions) ? state.positions : [];
-  const rows = positions.map(p => `<tr><td>${htmlEscape(p.symbol)}</td><td>${htmlEscape(p.side)}</td><td>${Number(p.entry || 0).toFixed(6)}</td><td>${Number(p.mark || 0).toFixed(6)}</td><td>${Number(p.pnl || 0).toFixed(2)}</td></tr>`).join('');
-  return `<!doctype html><html lang=\"es\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>GALAXI V32</title><meta http-equiv=\"refresh\" content=\"10\"><style>body{font-family:system-ui;background:#0d1117;color:#eee;margin:0;padding:24px}main{max-width:1000px;margin:auto}h1{margin:0 0 6px}.sub{color:#9ca3af;margin-bottom:20px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}.card{background:#161b22;border:1px solid #30363d;border-radius:14px;padding:16px}.k{color:#8b949e;font-size:13px}.v{font-size:22px;font-weight:700;margin-top:5px}table{width:100%;border-collapse:collapse;margin-top:16px;background:#161b22;border-radius:14px;overflow:hidden}th,td{text-align:left;padding:10px;border-bottom:1px solid #30363d}a{color:#58a6ff}</style></head><body><main><h1>GALAXI V32 · Behavioral Engine</h1><div class=\"sub\">${htmlEscape(state.mode)} · IA ${htmlEscape(state.aiModel)} · actualización ${htmlEscape(state.lastUpdate || 'iniciando')}</div><div class=\"grid\"><div class=\"card\"><div class=\"k\">Estado</div><div class=\"v\">${state.running ? 'ACTIVO' : 'DETENIDO'}</div></div><div class=\"card\"><div class=\"k\">Equity</div><div class=\"v\">$${Number(state.equity).toFixed(2)}</div></div><div class=\"card\"><div class=\"k\">Posiciones</div><div class=\"v\">${positions.length} · L${state.longOpen}/S${state.shortOpen}</div></div><div class=\"card\"><div class=\"k\">Mercados</div><div class=\"v\">${state.symbols}</div></div><div class=\"card\"><div class=\"k\">Deep / IA</div><div class=\"v\">${state.deepScanned} / ${state.candidates}</div></div><div class=\"card\"><div class=\"k\">WS Binance</div><div class=\"v\">${state.wsConnected ? 'CONECTADO' : 'DESCONECTADO'}</div></div><div class=\"card\"><div class=\"k\">Ciclos</div><div class=\"v\">${state.cycle}</div></div><div class=\"card\"><div class=\"k\">IA calls / errores</div><div class=\"v\">${state.aiCalls} / ${state.aiErrors}</div></div></div><h2>Posiciones</h2><table><thead><tr><th>Símbolo</th><th>Lado</th><th>Entrada</th><th>Mark</th><th>PnL</th></tr></thead><tbody>${rows || '<tr><td colspan=5>Sin posiciones abiertas</td></tr>'}</tbody></table><p><a href=\"/health\">/health</a> · <a href=\"/state\">/state</a></p></main></body></html>`;
+  const rows = positions.map(p => `<tr><td>${htmlEscape(p.symbol)}</td><td>${htmlEscape(p.side)}</td><td>${Number(p.entry || 0).toFixed(6)}</td><td>${Number(p.mark || p.current || 0).toFixed(6)}</td><td>${Number(p.pnl || 0).toFixed(2)}</td></tr>`).join('');
+  const e = state.edgeScanner || {};
+  const fmt = x => x == null ? '—' : Number(x).toFixed(2);
+  const topRows = (Array.isArray(state.ranking) ? state.ranking.slice(0, 8) : []).map(x => `<tr><td>${htmlEscape(x.symbol)}</td><td>${htmlEscape(x.preferredSide || '—')}</td><td>${fmt(x.edgeScore)}</td><td>${fmt(x.edgeLong)}</td><td>${fmt(x.edgeShort)}</td><td>${htmlEscape(x.behavior?.side || 'MIXTO')}</td><td>${fmt(x.premium?.fundingRatePct)}%</td><td>${fmt(x.openInterestChangePct)}%</td></tr>`).join('');
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GALAXI V33 · EDGE TERMINAL</title><meta http-equiv="refresh" content="10"><style>body{font-family:system-ui;background:#080b10;color:#eee;margin:0;padding:18px}main{max-width:1100px;margin:auto}.top{display:flex;justify-content:space-between;gap:12px;align-items:end;margin-bottom:16px}.sub{color:#8b949e}.pill{border:1px solid #2f81f7;border-radius:999px;padding:5px 10px;color:#58a6ff;font-size:12px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px}.card{background:#11161d;border:1px solid #252d38;border-radius:12px;padding:14px}.k{color:#8b949e;font-size:12px}.v{font-size:22px;font-weight:750;margin-top:5px}.section{margin-top:18px}.scanner{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px}.edge{background:#0f151c;border:1px solid #26303c;border-radius:12px;padding:14px}.edge b{font-size:20px}.muted{color:#8b949e;font-size:12px}.good{color:#3fb950}.warn{color:#d29922}table{width:100%;border-collapse:collapse;margin-top:10px;background:#11161d;border:1px solid #252d38;border-radius:12px;overflow:hidden}th,td{text-align:left;padding:9px;border-bottom:1px solid #252d38;font-size:13px}a{color:#58a6ff}.tag{display:inline-block;padding:2px 7px;border-radius:999px;background:#1b2330;color:#c9d1d9;font-size:11px;margin-right:4px}</style></head><body><main><div class="top"><div><h1 style="margin:0">GALAXI V33 · EDGE TERMINAL</h1><div class="sub">${htmlEscape(state.mode)} · IA ${htmlEscape(state.aiModel)} · ciclo ${state.cycle}</div></div><span class="pill">${state.wsConnected ? 'BINANCE LIVE DATA' : 'BINANCE DESCONECTADO'}</span></div><div class="grid"><div class="card"><div class="k">Equity</div><div class="v">$${Number(state.equity).toFixed(2)}</div></div><div class="card"><div class="k">Net PnL</div><div class="v">$${Number(state.realizedPnl + state.unrealizedPnl).toFixed(2)}</div></div><div class="card"><div class="k">Mercados</div><div class="v">${state.symbols}</div></div><div class="card"><div class="k">Deep / IA</div><div class="v">${state.deepScanned} / ${state.candidates}</div></div><div class="card"><div class="k">IA calls / errores</div><div class="v">${state.aiCalls} / ${state.aiErrors}</div></div><div class="card"><div class="k">Top Trader coverage</div><div class="v">${state.behaviorCoverage}%</div></div><div class="card"><div class="k">Edge tradeable</div><div class="v">${e.tradeableCount || 0}</div></div><div class="card"><div class="k">Posiciones</div><div class="v">${positions.length} · L${state.longOpen}/S${state.shortOpen}</div></div></div><div class="section"><h2>EDGE SCANNER</h2><div class="scanner"><div class="edge"><div class="muted">MEJOR LONG</div><b>${htmlEscape(e.bestLong?.symbol || '—')}</b><div>Score <span class="good">${fmt(e.bestLong?.score)}</span></div><div class="muted">Trader ${htmlEscape(e.bestLong?.behavior || '—')} · funding ${fmt(e.bestLong?.funding)}% · basis ${fmt(e.bestLong?.basis)}%</div></div><div class="edge"><div class="muted">MEJOR SHORT</div><b>${htmlEscape(e.bestShort?.symbol || '—')}</b><div>Score <span class="good">${fmt(e.bestShort?.score)}</span></div><div class="muted">Trader ${htmlEscape(e.bestShort?.behavior || '—')} · funding ${fmt(e.bestShort?.funding)}% · basis ${fmt(e.bestShort?.basis)}%</div></div><div class="edge"><div class="muted">MEJOR OPORTUNIDAD</div><b>${htmlEscape(e.bestOverall?.symbol || '—')} ${htmlEscape(e.bestOverall?.side || '')}</b><div>Score <span class="good">${fmt(e.bestOverall?.score)}</span></div><div class="muted">Observados ${e.watchedCount || 0} · promedio ${fmt(e.avgEdge)}</div></div></div></div><div class="section"><h2>EDGE LEADERBOARD</h2><table><thead><tr><th>Símbolo</th><th>Sesgo</th><th>Edge</th><th>Long</th><th>Short</th><th>Top Trader</th><th>Funding</th><th>OI 5m</th></tr></thead><tbody>${topRows || '<tr><td colspan=8>Esperando scanner</td></tr>'}</tbody></table></div><div class="section"><h2>Posiciones</h2><table><thead><tr><th>Símbolo</th><th>Lado</th><th>Entrada</th><th>Mark</th><th>PnL</th></tr></thead><tbody>${rows || '<tr><td colspan=5>Sin posiciones abiertas</td></tr>'}</tbody></table></div><div class="section muted">Régimen: <span class="tag">${htmlEscape(state.regime)}</span> Comportamiento: <span class="tag">${htmlEscape(state.behaviorBias)}</span> · Confianza ${state.behaviorConfidence}% · <a href="/health">health</a> · <a href="/state">state</a></div></main></body></html>`;
 }
 
 const webServer = http.createServer((req, res) => {
@@ -154,6 +158,15 @@ const state = {
   behaviorBias: 'MIXTO',
   behaviorConfidence: 0,
 
+  edgeScanner: {
+    bestLong: null,
+    bestShort: null,
+    bestOverall: null,
+    tradeableCount: 0,
+    watchedCount: 0,
+    avgEdge: 0
+  },
+
   positions: [],
   ranking: [],
   history: [],
@@ -185,6 +198,7 @@ const cooldown = new Map();
 const marketInfo = new Map();
 const behaviorCache = new Map();
 const openInterestCache = new Map();
+const premiumCache = new Map();
 
 let learningTrades = [];
 let ws = null;
@@ -674,6 +688,77 @@ async function fetchTopTraderBehavior(symbol) {
   }
 }
 
+
+async function fetchPremiumIndex(symbol) {
+  const cached = premiumCache.get(symbol);
+  if (cached && now() - cached.ts < cfg.edgeCacheMs) return cached;
+
+  try {
+    const data = await rest('/fapi/v1/premiumIndex', { params: { symbol } });
+    const mark = Number(data?.markPrice || 0);
+    const index = Number(data?.indexPrice || 0);
+    const fundingRate = Number(data?.lastFundingRate || 0);
+    const basisPct = index > 0 ? (mark / index - 1) * 100 : 0;
+    const result = {
+      markPrice: mark,
+      indexPrice: index,
+      basisPct: round(basisPct, 4),
+      fundingRate: round(fundingRate, 6),
+      fundingRatePct: round(fundingRate * 100, 4),
+      nextFundingTime: Number(data?.nextFundingTime || 0),
+      ts: now()
+    };
+    premiumCache.set(symbol, result);
+    return result;
+  } catch (e) {
+    return cached || {
+      markPrice: 0,
+      indexPrice: 0,
+      basisPct: 0,
+      fundingRate: 0,
+      fundingRatePct: 0,
+      nextFundingTime: 0,
+      ts: now(),
+      error: e.message
+    };
+  }
+}
+
+function edgeForSide(row, side) {
+  const dir = side === 'LONG' ? 1 : -1;
+  const m5 = Number(row.momentum5m || 0) * dir;
+  const m15 = Number(row.momentum15m || 0) * dir;
+  const m30 = Number(row.momentum30m || 0) * dir;
+  const bias = row.bias === side ? 1 : row.bias === 'NEUTRAL' ? 0.45 : 0;
+  const traderRatio = Number(row.behavior?.positionRatio || 1);
+  const trader = side === 'LONG' ? traderRatio - 1 : 1 - traderRatio;
+  const consistency = Number(row.behavior?.consistency || 0);
+  const oi = Number(row.openInterestChangePct || 0) * dir;
+  const funding = Number(row.premium?.fundingRatePct || 0) * dir;
+  const basis = Number(row.premium?.basisPct || 0) * dir;
+  const volume = Math.max(0, Number(row.volumeRatio || 1) - 1);
+
+  const techScore = clamp((m5 * 3 + m15 * 2 + m30) * 1.8, 0, 30);
+  const biasScore = bias * 12;
+  const behaviorScore = clamp(trader * 45, 0, 18) * (0.65 + consistency * 0.35);
+  const oiScore = clamp(oi * 2.5, 0, 12);
+  const flowScore = clamp(volume * 7, 0, 10);
+  const crowdingScore = clamp(funding * 4 + basis * 3, 0, 10);
+
+  const total = clamp(techScore + biasScore + behaviorScore + oiScore + flowScore + crowdingScore, 0, 100);
+  return round(total, 2);
+}
+
+function enrichEdge(row) {
+  const long = edgeForSide(row, 'LONG');
+  const short = edgeForSide(row, 'SHORT');
+  const preferredSide = long >= short ? 'LONG' : 'SHORT';
+  const edgeScore = Math.max(long, short);
+  const behaviorSide = row.behavior?.side || 'MIXTO';
+  const agreement = behaviorSide === preferredSide ? 'CONFIRMADA' : behaviorSide === 'MIXTO' ? 'NEUTRA' : 'CONTRARIA';
+  return { ...row, edgeLong: long, edgeShort: short, edgeScore, preferredSide, behaviorAgreement: agreement };
+}
+
 async function mapLimit(items, limit, worker) {
   const out = [];
   for (let i = 0; i < items.length; i += limit) {
@@ -725,34 +810,44 @@ async function buildMarketSnapshot() {
   const behaviorUniverse = technicals.slice(0, Math.min(cfg.traderTopSymbols, technicals.length));
 
   const enrichedAll = await mapLimit(behaviorUniverse, cfg.behaviorConcurrency, async row => {
-    const [behavior, oi] = await Promise.all([
+    const [behavior, oi, premium] = await Promise.all([
       fetchTopTraderBehavior(row.symbol),
-      fetchOpenInterest(row.symbol)
+      fetchOpenInterest(row.symbol),
+      fetchPremiumIndex(row.symbol)
     ]);
 
-    return {
+    return enrichEdge({
       ...row,
       behavior,
       openInterest: oi.value,
-      openInterestChangePct: oi.changePct
-    };
+      openInterestChangePct: oi.changePct,
+      premium
+    });
   });
 
-  // Rank after behavior/OI enrichment, not before it.
-  enrichedAll.sort((a, b) => {
-    const sideScore = x => {
-      const tech = Math.max(Math.abs(x.momentum5m), Math.abs(x.momentum15m));
-      const trader = Math.abs(Number(x.behavior?.accountRatio || 1) - 1);
-      const consistency = Number(x.behavior?.consistency || 0);
-      const volume = Math.min(3, Number(x.volumeRatio || 1));
-      return tech * 1.2 + trader * 0.5 + consistency * 0.25 + Math.max(0, volume - 1) * 0.1;
-    };
-    return sideScore(b) - sideScore(a);
-  });
+  // Rank after behavior/OI/funding/basis enrichment. This is the
+  // screenshot-inspired EDGE SCANNER: technicals find movement, while
+  // behavior + OI + funding/basis decide whether that movement is actionable.
+  enrichedAll.sort((a, b) => Number(b.edgeScore || 0) - Number(a.edgeScore || 0));
 
   const enriched = enrichedAll.slice(0, Math.min(cfg.aiTopSymbols, enrichedAll.length));
   state.candidates = enriched.length;
   state.ranking = enriched.slice(0, 20);
+
+  const longRank = [...enrichedAll].sort((a, b) => Number(b.edgeLong || 0) - Number(a.edgeLong || 0));
+  const shortRank = [...enrichedAll].sort((a, b) => Number(b.edgeShort || 0) - Number(a.edgeShort || 0));
+  const bestLong = longRank[0] || null;
+  const bestShort = shortRank[0] || null;
+  const bestOverall = enrichedAll[0] || null;
+  const tradeableCount = enrichedAll.filter(x => Number(x.edgeScore || 0) >= 55).length;
+  state.edgeScanner = {
+    bestLong: bestLong ? { symbol: bestLong.symbol, score: bestLong.edgeLong, behavior: bestLong.behavior?.side || 'MIXTO', funding: bestLong.premium?.fundingRatePct || 0, basis: bestLong.premium?.basisPct || 0 } : null,
+    bestShort: bestShort ? { symbol: bestShort.symbol, score: bestShort.edgeShort, behavior: bestShort.behavior?.side || 'MIXTO', funding: bestShort.premium?.fundingRatePct || 0, basis: bestShort.premium?.basisPct || 0 } : null,
+    bestOverall: bestOverall ? { symbol: bestOverall.symbol, side: bestOverall.preferredSide, score: bestOverall.edgeScore } : null,
+    tradeableCount,
+    watchedCount: enrichedAll.length,
+    avgEdge: round(avg(enrichedAll.map(x => Number(x.edgeScore || 0))), 2)
+  };
 
   const longN = enriched.filter(x => x.bias === 'LONG').length;
   const shortN = enriched.filter(x => x.bias === 'SHORT').length;
@@ -1028,6 +1123,13 @@ async function askAI(market, account) {
       volumeRatio: x.volumeRatio,
       breakoutUp: x.breakoutUp,
       breakoutDown: x.breakoutDown,
+      edgeScore: x.edgeScore,
+      edgeLong: x.edgeLong,
+      edgeShort: x.edgeShort,
+      preferredSide: x.preferredSide,
+      behaviorAgreement: x.behaviorAgreement,
+      fundingRatePct: x.premium?.fundingRatePct || 0,
+      basisPct: x.premium?.basisPct || 0,
 
       topTraderAccountRatio: x.behavior?.accountRatio || 1,
       topTraderPositionRatio: x.behavior?.positionRatio || 1,
@@ -1072,6 +1174,7 @@ async function askAI(market, account) {
     },
 
     learning: learningSummary(),
+    edgeScanner: state.edgeScanner,
     market: compactMarket,
     positions
   };
@@ -1091,6 +1194,17 @@ CAPAS QUE DEBES COMBINAR:
 5) Open Interest cuando esté disponible.
 6) Memoria de resultados propios de GALAXI.
 7) Estado actual de la cartera y tesis de cada posición.
+8) EDGE SCANNER: compara LONG vs SHORT usando score técnico, comportamiento, OI,
+funding y basis. Usa el score como filtro de calidad, no como garantía.
+
+MODELO TIPO TERMINAL:
+- 'Mispricing' en cripto se aproxima con basis mark/index + funding; no significa
+  arbitraje garantizado.
+- 'Wallet tracker' se sustituye por comportamiento agregado Top Trader de Binance;
+  no hay que inventar identidades ni copiar wallets individuales.
+- 'Copytrade' significa seguir el sesgo agregado sólo cuando coincide con el resto
+  de las señales.
+- El ranking debe buscar oportunidad relativa y no popularidad de la moneda.
 
 TOP TRADERS:
 Los datos son agregados del 20% superior por saldo de margen; NO son identidades
@@ -1106,6 +1220,8 @@ BALANCE:
 
 ENTRADA:
 - Sólo OPEN_LONG/OPEN_SHORT cuando la tesis esté confirmada.
+- Compara siempre la mejor oportunidad LONG contra la mejor SHORT antes de decidir.
+- Prefiere símbolos con edgeScore alto y señales independientes que coincidan.
 - expected_net_pct debe superar ${cfg.minExpectedNetPct}% después de comisiones.
 - Evita entradas tardías cuando el movimiento ya está demasiado extendido.
 - No repitas una moneda sólo porque funcionó antes.
@@ -1160,7 +1276,7 @@ Formato:
         text: {
           format: {
             type: 'json_schema',
-            name: 'galaxi_v32_trade_decision',
+            name: 'galaxi_v33_trade_decision',
             strict: true,
             schema: {
               type: 'object',
@@ -1343,7 +1459,7 @@ function paperOpen(a, marketRow) {
 
     confidence: Number(a.confidence || 0),
     expectedNetPct: Number(a.expected_net_pct || 0),
-    strategy: 'V32_BEHAVIORAL',
+    strategy: 'V33_EDGE_BEHAVIORAL',
     thesis: a.reason,
 
     features: {
@@ -1825,7 +1941,7 @@ function loadControl() {
 
 async function boot() {
   console.log(
-    `GALAXI V32 | mode=${cfg.mode}` +
+    `GALAXI V33 | mode=${cfg.mode}` +
     ` | model=${cfg.openaiModel}` +
     ` | scan=${cfg.scanMs}ms` +
     ` | deep=${cfg.deepScanSymbols}` +
