@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import WebSocket from 'ws';
 
 /*
-GALAXI V26 AI DIAGNOSTIC
+GALAXI V28 POSITIONS DIRECT
 - Real-time Binance USD-M Futures market data
 - AI decision engine through OpenAI Responses API
 - PAPER by default
@@ -46,7 +46,7 @@ const cfg = {
   maxDrawdownPct: Math.min(30, Math.max(1, Number(process.env.MAX_DRAWDOWN_PCT || 10))),
   minSecondsBetweenOrders: Math.max(2, Number(process.env.MIN_SECONDS_BETWEEN_ORDERS || 5)),
   maxActionsPerCycle: Math.min(4, Math.max(1, Number(process.env.MAX_ACTIONS_PER_CYCLE || 4))),
-  minExpectedNetPct: Math.max(0.01, Number(process.env.MIN_EXPECTED_NET_PCT || 0.02)),
+  minExpectedNetPct: Math.max(0.005, Number(process.env.MIN_EXPECTED_NET_PCT || 0.01)),
 
   paperTpPct: Number(process.env.PAPER_TP_PCT || 1.2),
   paperSlPct: Number(process.env.PAPER_SL_PCT || 0.7),
@@ -949,7 +949,7 @@ function markPaperPositions() {
   state.positions = keep;
 }
 
-async function executeDecision(decision) {
+async function executeDecision(decision, market) {
   state.aiDecision = decision;
   state.aiReasoning = decision.summary || '';
   state.regime = decision.regime || state.regime;
@@ -962,12 +962,12 @@ async function executeDecision(decision) {
   // no OPEN action. PAPER remains the default and risk limits still apply.
   if ((!state.positions || state.positions.length === 0) &&
       !rawActions.some(a => a && (a.action === 'OPEN_LONG' || a.action === 'OPEN_SHORT'))) {
-    const top = Array.isArray(market) ? market.find(m => {
+    const top = Array.isArray(market) ? (market.find(m => {
       if (!m?.symbol || cooldown.has(m.symbol)) return false;
       return m.bias === 'LONG' || m.bias === 'SHORT' ||
-        Math.abs(Number(m.momentum5m || 0)) > 0.05 ||
-        Math.abs(Number(m.momentum15m || 0)) > 0.10;
-    }) : null;
+        Math.abs(Number(m.momentum5m || 0)) > 0.02 ||
+        Math.abs(Number(m.momentum15m || 0)) > 0.04;
+    }) || market.find(m => m?.symbol && !cooldown.has(m.symbol))) : null;
 
     if (top) {
       const side = top.bias === 'SHORT' ||
@@ -1179,7 +1179,7 @@ async function runCycle() {
 
     const account = cfg.mode === 'LIVE' ? (lastAccount || await getLiveAccount()) : paperAccount();
     const decision = await askAI(market, account);
-    await executeDecision(decision);
+    await executeDecision(decision, market);
 
     state.lastSignal = decision.summary || 'IA evaluó el mercado';
     if (!state.lastError) state.lastError = null;
