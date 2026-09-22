@@ -74,8 +74,8 @@ const cfg = {
   minExpectedNetPct: Math.max(0.02, Number(process.env.MIN_EXPECTED_NET_PCT || 0.08)),
   estimatedFeeRate: Math.max(0.0001, Number(process.env.ESTIMATED_FEE_RATE || 0.0004)),
 
-  maxDailyLossPct: Math.min(20, Math.max(0.5, Number(process.env.MAX_DAILY_LOSS_PCT || 5))),
-  maxDrawdownPct: Math.min(30, Math.max(1, Number(process.env.MAX_DRAWDOWN_PCT || 10))),
+  maxDailyLossPct: Math.min(10, Math.max(0.5, Number(process.env.MAX_DAILY_LOSS_PCT || 2))),
+  maxDrawdownPct: Math.min(15, Math.max(1, Number(process.env.MAX_DRAWDOWN_PCT || 3))),
   minSecondsBetweenOrders: Math.max(2, Number(process.env.MIN_SECONDS_BETWEEN_ORDERS || 2)),
   maxActionsPerCycle: Math.min(12, Math.max(1, Number(process.env.MAX_ACTIONS_PER_CYCLE || 12))),
 
@@ -83,6 +83,7 @@ const cfg = {
   paperSlPct: Number(process.env.PAPER_SL_PCT || 0.55),
   paperMaxHoldMs: Number(process.env.PAPER_MAX_HOLD_MS || 600000), // 10 min
   paperProfitTakeUsd: Number(process.env.PAPER_PROFIT_TAKE_USD || 8),
+  paperHardLossUsd: Number(process.env.PAPER_HARD_LOSS_USD || 12),
   paperProfitLockTriggerPct: Number(process.env.PAPER_PROFIT_LOCK_TRIGGER_PCT || 0.25),
   paperProfitGivebackPct: Number(process.env.PAPER_PROFIT_GIVEBACK_PCT || 0.12),
   paperMinLockedPct: Number(process.env.PAPER_MIN_LOCKED_PCT || 0.08),
@@ -107,7 +108,7 @@ function dashboardHtml() {
   const e = state.edgeScanner || {};
   const fmt = x => x == null ? '—' : Number(x).toFixed(2);
   const topRows = (Array.isArray(state.ranking) ? state.ranking.slice(0, 8) : []).map(x => `<tr><td>${htmlEscape(x.symbol)}</td><td>${htmlEscape(x.preferredSide || '—')}</td><td>${fmt(x.edgeScore)}</td><td>${fmt(x.edgeLong)}</td><td>${fmt(x.edgeShort)}</td><td>${htmlEscape(x.behavior?.side || 'MIXTO')}</td><td>${fmt(x.premium?.fundingRatePct)}%</td><td>${fmt(x.openInterestChangePct)}%</td></tr>`).join('');
-  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GALAXI V35 · 12 POSITIONS · 6 LONG / 6 SHORT</title><meta http-equiv="refresh" content="10"><style>body{font-family:system-ui;background:#080b10;color:#eee;margin:0;padding:18px}main{max-width:1100px;margin:auto}.top{display:flex;justify-content:space-between;gap:12px;align-items:end;margin-bottom:16px}.sub{color:#8b949e}.pill{border:1px solid #2f81f7;border-radius:999px;padding:5px 10px;color:#58a6ff;font-size:12px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px}.card{background:#11161d;border:1px solid #252d38;border-radius:12px;padding:14px}.k{color:#8b949e;font-size:12px}.v{font-size:22px;font-weight:750;margin-top:5px}.section{margin-top:18px}.scanner{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px}.edge{background:#0f151c;border:1px solid #26303c;border-radius:12px;padding:14px}.edge b{font-size:20px}.muted{color:#8b949e;font-size:12px}.good{color:#3fb950}.warn{color:#d29922}table{width:100%;border-collapse:collapse;margin-top:10px;background:#11161d;border:1px solid #252d38;border-radius:12px;overflow:hidden}th,td{text-align:left;padding:9px;border-bottom:1px solid #252d38;font-size:13px}a{color:#58a6ff}.tag{display:inline-block;padding:2px 7px;border-radius:999px;background:#1b2330;color:#c9d1d9;font-size:11px;margin-right:4px}</style></head><body><main><div class="top"><div><h1 style="margin:0">GALAXI V35 · 12 POSITIONS · 6 LONG / 6 SHORT</h1><div class="sub">${htmlEscape(state.mode)} · IA ${htmlEscape(state.aiModel)} · ciclo ${state.cycle}</div></div><span class="pill">${state.wsConnected ? 'BINANCE LIVE DATA' : 'BINANCE DESCONECTADO'}</span></div><div class="grid"><div class="card"><div class="k">Equity</div><div class="v">$${Number(state.equity).toFixed(2)}</div></div><div class="card"><div class="k">Net PnL</div><div class="v">$${Number(state.realizedPnl + state.unrealizedPnl).toFixed(2)}</div></div><div class="card"><div class="k">Mercados</div><div class="v">${state.symbols}</div></div><div class="card"><div class="k">Deep / IA</div><div class="v">${state.deepScanned} / ${state.candidates}</div></div><div class="card"><div class="k">IA calls / errores</div><div class="v">${state.aiCalls} / ${state.aiErrors}</div></div><div class="card"><div class="k">Top Trader coverage</div><div class="v">${state.behaviorCoverage}%</div></div><div class="card"><div class="k">Edge tradeable</div><div class="v">${e.tradeableCount || 0}</div></div><div class="card"><div class="k">Posiciones</div><div class="v">${positions.length} · L${state.longOpen}/S${state.shortOpen}</div></div></div><div class="section"><h2>EDGE SCANNER</h2><div class="scanner"><div class="edge"><div class="muted">MEJOR LONG</div><b>${htmlEscape(e.bestLong?.symbol || '—')}</b><div>Score <span class="good">${fmt(e.bestLong?.score)}</span></div><div class="muted">Trader ${htmlEscape(e.bestLong?.behavior || '—')} · funding ${fmt(e.bestLong?.funding)}% · basis ${fmt(e.bestLong?.basis)}%</div></div><div class="edge"><div class="muted">MEJOR SHORT</div><b>${htmlEscape(e.bestShort?.symbol || '—')}</b><div>Score <span class="good">${fmt(e.bestShort?.score)}</span></div><div class="muted">Trader ${htmlEscape(e.bestShort?.behavior || '—')} · funding ${fmt(e.bestShort?.funding)}% · basis ${fmt(e.bestShort?.basis)}%</div></div><div class="edge"><div class="muted">MEJOR OPORTUNIDAD</div><b>${htmlEscape(e.bestOverall?.symbol || '—')} ${htmlEscape(e.bestOverall?.side || '')}</b><div>Score <span class="good">${fmt(e.bestOverall?.score)}</span></div><div class="muted">Observados ${e.watchedCount || 0} · promedio ${fmt(e.avgEdge)}</div></div></div></div><div class="section"><h2>EDGE LEADERBOARD</h2><table><thead><tr><th>Símbolo</th><th>Sesgo</th><th>Edge</th><th>Long</th><th>Short</th><th>Top Trader</th><th>Funding</th><th>OI 5m</th></tr></thead><tbody>${topRows || '<tr><td colspan=8>Esperando scanner</td></tr>'}</tbody></table></div><div class="section"><h2>Posiciones</h2><table><thead><tr><th>Símbolo</th><th>Lado</th><th>Entrada</th><th>Mark</th><th>PnL</th><th>Pico</th><th>Edad</th></tr></thead><tbody>${rows || '<tr><td colspan=7>Sin posiciones abiertas</td></tr>'}</tbody></table></div><div class="section muted">Régimen: <span class="tag">${htmlEscape(state.regime)}</span> Comportamiento: <span class="tag">${htmlEscape(state.behaviorBias)}</span> · Confianza ${state.behaviorConfidence}% · <a href="/health">health</a> · <a href="/state">state</a></div></main></body></html>`;
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GALAXI V35 · 12 POSITIONS · 6 LONG / 6 SHORT</title><meta http-equiv="refresh" content="10"><style>body{font-family:system-ui;background:#080b10;color:#eee;margin:0;padding:18px}main{max-width:1100px;margin:auto}.top{display:flex;justify-content:space-between;gap:12px;align-items:end;margin-bottom:16px}.sub{color:#8b949e}.pill{border:1px solid #2f81f7;border-radius:999px;padding:5px 10px;color:#58a6ff;font-size:12px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px}.card{background:#11161d;border:1px solid #252d38;border-radius:12px;padding:14px}.k{color:#8b949e;font-size:12px}.v{font-size:22px;font-weight:750;margin-top:5px}.section{margin-top:18px}.scanner{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px}.edge{background:#0f151c;border:1px solid #26303c;border-radius:12px;padding:14px}.edge b{font-size:20px}.muted{color:#8b949e;font-size:12px}.good{color:#3fb950}.warn{color:#d29922}table{width:100%;border-collapse:collapse;margin-top:10px;background:#11161d;border:1px solid #252d38;border-radius:12px;overflow:hidden}th,td{text-align:left;padding:9px;border-bottom:1px solid #252d38;font-size:13px}a{color:#58a6ff}.tag{display:inline-block;padding:2px 7px;border-radius:999px;background:#1b2330;color:#c9d1d9;font-size:11px;margin-right:4px}</style></head><body><main><div class="top"><div><h1 style="margin:0">GALAXI V35 · 12 POSITIONS · 6 LONG / 6 SHORT</h1><div class="sub">${htmlEscape(state.mode)} · IA ${htmlEscape(state.aiModel)} · ciclo ${state.cycle}</div></div><span class="pill">${state.wsConnected ? 'BINANCE LIVE DATA' : 'BINANCE DESCONECTADO'}</span></div><div class="grid"><div class="card"><div class="k">Equity</div><div class="v">$${Number(state.equity).toFixed(2)}</div></div><div class="card"><div class="k">Net PnL</div><div class="v">$${Number(state.realizedPnl + state.unrealizedPnl).toFixed(2)}</div></div><div class="card"><div class="k">Mercados</div><div class="v">${state.symbols}</div></div><div class="card"><div class="k">Deep / IA</div><div class="v">${state.deepScanned} / ${state.candidates}</div></div><div class="card"><div class="k">IA calls / errores</div><div class="v">${state.aiCalls} / ${state.aiErrors}</div></div><div class="card"><div class="k">Top Trader coverage</div><div class="v">${state.behaviorCoverage}%</div></div><div class="card"><div class="k">Edge tradeable</div><div class="v">${e.tradeableCount || 0}</div></div><div class="card"><div class="k">Posiciones</div><div class="v">${positions.length} · L${state.longOpen}/S${state.shortOpen}</div></div></div><div class="section"><div class="card"><div class="k">P&L AUDIT · TP / HARD LOSS</div><div class="v">+$${Number(state.paperProfitTakeUsd ?? cfg.paperProfitTakeUsd).toFixed(2)} / -$${Number(state.paperHardLossUsd ?? cfg.paperHardLossUsd).toFixed(2)}</div><div class="muted">Realizado $${Number(state.realizedPnl||0).toFixed(2)} · No realizado $${Number(state.unrealizedPnl||0).toFixed(2)} · discrepancia $${Number(state.pnlAudit?.discrepancy||0).toFixed(4)}</div></div></div><div class="section"><h2>EDGE SCANNER</h2><div class="scanner"><div class="edge"><div class="muted">MEJOR LONG</div><b>${htmlEscape(e.bestLong?.symbol || '—')}</b><div>Score <span class="good">${fmt(e.bestLong?.score)}</span></div><div class="muted">Trader ${htmlEscape(e.bestLong?.behavior || '—')} · funding ${fmt(e.bestLong?.funding)}% · basis ${fmt(e.bestLong?.basis)}%</div></div><div class="edge"><div class="muted">MEJOR SHORT</div><b>${htmlEscape(e.bestShort?.symbol || '—')}</b><div>Score <span class="good">${fmt(e.bestShort?.score)}</span></div><div class="muted">Trader ${htmlEscape(e.bestShort?.behavior || '—')} · funding ${fmt(e.bestShort?.funding)}% · basis ${fmt(e.bestShort?.basis)}%</div></div><div class="edge"><div class="muted">MEJOR OPORTUNIDAD</div><b>${htmlEscape(e.bestOverall?.symbol || '—')} ${htmlEscape(e.bestOverall?.side || '')}</b><div>Score <span class="good">${fmt(e.bestOverall?.score)}</span></div><div class="muted">Observados ${e.watchedCount || 0} · promedio ${fmt(e.avgEdge)}</div></div></div></div><div class="section"><h2>EDGE LEADERBOARD</h2><table><thead><tr><th>Símbolo</th><th>Sesgo</th><th>Edge</th><th>Long</th><th>Short</th><th>Top Trader</th><th>Funding</th><th>OI 5m</th></tr></thead><tbody>${topRows || '<tr><td colspan=8>Esperando scanner</td></tr>'}</tbody></table></div><div class="section"><h2>Posiciones</h2><table><thead><tr><th>Símbolo</th><th>Lado</th><th>Entrada</th><th>Mark</th><th>PnL</th><th>Pico</th><th>Edad</th></tr></thead><tbody>${rows || '<tr><td colspan=7>Sin posiciones abiertas</td></tr>'}</tbody></table></div><div class="section muted">Régimen: <span class="tag">${htmlEscape(state.regime)}</span> Comportamiento: <span class="tag">${htmlEscape(state.behaviorBias)}</span> · Confianza ${state.behaviorConfidence}% · <a href="/health">health</a> · <a href="/state">state</a></div></main></body></html>`;
 }
 
 const webServer = http.createServer((req, res) => {
@@ -145,6 +146,9 @@ const state = {
   initialCapital: cfg.capital,
   realizedPnl: 0,
   unrealizedPnl: 0,
+  paperProfitTakeUsd: cfg.paperProfitTakeUsd,
+  paperHardLossUsd: cfg.paperHardLossUsd,
+  pnlAudit: { initialCapital: cfg.capital, realizedPnl: 0, unrealizedPnl: 0, equity: cfg.capital, expectedEquity: cfg.capital, discrepancy: 0 },
   todayPnl: 0,
   drawdownPct: 0,
   dailyLossPct: 0,
@@ -276,6 +280,14 @@ function writeState() {
   const dd = Math.max(0, cfg.capital - state.equity);
   state.drawdownPct = cfg.capital ? dd / cfg.capital * 100 : 0;
   state.dailyLossPct = Math.min(0, state.realizedPnl / cfg.capital * 100);
+  state.pnlAudit = {
+    initialCapital: round(cfg.capital, 2),
+    realizedPnl: round(state.realizedPnl, 2),
+    unrealizedPnl: round(state.unrealizedPnl, 2),
+    equity: round(state.equity, 2),
+    expectedEquity: round(cfg.capital + state.realizedPnl + state.unrealizedPnl, 2),
+    discrepancy: round(state.equity - (cfg.capital + state.realizedPnl + state.unrealizedPnl), 6)
+  };
   state.lastUpdate = new Date().toISOString();
 
   state.learning = learningSummary();
@@ -1020,8 +1032,9 @@ function learnFromTrade(position, exitReason) {
   const fees = Number(position.fees || 0);
   const notional = Math.max(0.0000001, Number(position.entryNotional || 0));
 
+  // paperClose stores position.pnl net of entry + exit fees. Do not subtract fees twice.
   const grossPct = notional ? pnl / notional * 100 : 0;
-  const netPnl = pnl - fees;
+  const netPnl = pnl;
   const netPct = notional ? netPnl / notional * 100 : 0;
 
   const features = {
@@ -1072,11 +1085,13 @@ function riskAllowsOpen(symbol, margin, side) {
 
   if (totalMargin + margin > maxTotal) return { ok: false, reason: 'MAX_TOTAL_MARGIN' };
 
-  if (Math.max(0, -state.dailyLossPct) >= cfg.maxDailyLossPct) {
+  const realizedLossPct = Math.max(0, -Number(state.realizedPnl || 0) / cfg.capital * 100);
+  const equityDrawdownPct = Math.max(0, (cfg.capital - Number(state.equity || cfg.capital)) / cfg.capital * 100);
+  if (realizedLossPct >= cfg.maxDailyLossPct) {
     return { ok: false, reason: 'DAILY_LOSS' };
   }
 
-  if (state.drawdownPct >= cfg.maxDrawdownPct) {
+  if (equityDrawdownPct >= cfg.maxDrawdownPct) {
     return { ok: false, reason: 'MAX_DRAWDOWN' };
   }
 
@@ -1571,10 +1586,11 @@ function paperClose(a, reasonOverride = null) {
   const exitNotional = Math.abs(p.current * p.qty);
   const exitFee = exitNotional * cfg.estimatedFeeRate;
 
-  p.pnl = grossPnl - p.fees - exitFee;
+  const netPnl = grossPnl - p.fees - exitFee;
   p.fees += exitFee;
+  p.pnl = netPnl;
 
-  state.realizedPnl += p.pnl;
+  state.realizedPnl += netPnl;
   state.positions = state.positions.filter(x => x.id !== p.id);
   cooldown.set(p.symbol, now() + 60000);
 
@@ -1621,6 +1637,7 @@ function markPaperPositions(market) {
     const age = tNow - p.openedTs;
     const tp = p.unrealizedPct >= cfg.paperTpPct;
     const sl = p.unrealizedPct <= -cfg.paperSlPct;
+    const hardLoss = p.pnl <= -Math.abs(cfg.paperHardLossUsd);
     const timeout = age >= cfg.paperMaxHoldMs;
     const cashTake = p.pnl >= cfg.paperProfitTakeUsd;
     const giveback = p.profitLockActive &&
@@ -1640,8 +1657,8 @@ function markPaperPositions(market) {
       continue;
     }
 
-    if (tp || cashTake || giveback || reversal || sl || timeout) {
-      const reason = cashTake ? 'PROFIT_USD' : tp ? 'TP' : giveback ? 'PROFIT_LOCK' : reversal ? 'MOMENTUM_REVERSAL' : sl ? 'SL' : 'TIME';
+    if (tp || cashTake || giveback || reversal || hardLoss || sl || timeout) {
+      const reason = cashTake ? 'PROFIT_USD' : tp ? 'TP' : giveback ? 'PROFIT_LOCK' : reversal ? 'MOMENTUM_REVERSAL' : hardLoss ? 'HARD_LOSS_USD' : sl ? 'SL' : 'TIME';
       paperClose({ symbol: p.symbol, reason }, reason);
     } else {
       keep.push(p);
@@ -1967,6 +1984,7 @@ async function runCycle() {
 
     if (cfg.mode === 'PAPER') {
       markPaperPositions(market);
+      writeState();
     } else {
       try {
         lastAccount = await getLiveAccount();
@@ -2022,7 +2040,7 @@ function loadControl() {
 
 async function boot() {
   console.log(
-    `GALAXI V33 | mode=${cfg.mode}` +
+    `GALAXI V36 AUDITED | mode=${cfg.mode}` +
     ` | model=${cfg.openaiModel}` +
     ` | scan=${cfg.scanMs}ms` +
     ` | deep=${cfg.deepScanSymbols}` +
