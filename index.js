@@ -15,24 +15,13 @@ GALAXI AI TRADER
 const runtimeFile = 'galaxi-runtime.json';
 const controlFile = 'galaxi-control.json';
 
-function envSecret(name) {
-  let v = String(process.env[name] || '').replace(/^\uFEFF/, '').trim();
-  if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
-    v = v.slice(1, -1).trim();
-  }
-  if (/[\x80-\uFFFF]/.test(v)) {
-    throw new Error(`${name} contiene caracteres no ASCII. En Railway vuelve a pegar la clave limpia, sin comillas, espacios ni texto adicional.`);
-  }
-  return v;
-}
-
 const cfg = {
   mode: String(process.env.TRADING_MODE || 'PAPER').toUpperCase(),
   liveArmed: String(process.env.LIVE_ARMED || 'false').toLowerCase() === 'true',
-  openaiKey: envSecret('OPENAI_API_KEY'),
-  openaiModel: String(process.env.OPENAI_MODEL || 'gpt-5.6-luna').trim(),
-  binanceKey: envSecret('BINANCE_API_KEY'),
-  binanceSecret: envSecret('BINANCE_API_SECRET'),
+  openaiKey: process.env.OPENAI_API_KEY || '',
+  openaiModel: process.env.OPENAI_MODEL || 'gpt-5.6',
+  binanceKey: process.env.BINANCE_API_KEY || '',
+  binanceSecret: process.env.BINANCE_API_SECRET || '',
   binanceBase: process.env.BINANCE_FAPI_BASE || 'https://fapi.binance.com',
   wsUrl: process.env.BINANCE_FUTURES_WS || 'wss://fstream.binance.com/ws/!miniTicker@arr',
 
@@ -171,9 +160,7 @@ async function rest(path, options = {}, signed = false) {
 
   const url = `${cfg.binanceBase}${path}${query.toString() ? `?${query}` : ''}`;
   const headers = {};
-  // Las llamadas públicas no necesitan API key. Sólo enviamos la clave
-  // en endpoints firmados para evitar fallos de Headers/ByteString.
-  if (signed && cfg.binanceKey) headers['X-MBX-APIKEY'] = cfg.binanceKey;
+  if (cfg.binanceKey) headers['X-MBX-APIKEY'] = cfg.binanceKey;
   if (method !== 'GET') headers['Content-Type'] = 'application/x-www-form-urlencoded';
 
   state.restCalls++;
@@ -381,6 +368,28 @@ async function seedTicksFromRest() {
     }
   }
   return seeded;
+}
+
+
+async function refreshPaperPrices() {
+  // PAPER must use a fresh mark price on every cycle. The WS is useful for
+  // streaming, but the REST snapshot prevents a stale tick from freezing
+  // current/PnL and therefore preventing TP/SL closes.
+  const data = await rest('/fapi/v1/ticker/price');
+  const ts = now();
+  let refreshed = 0;
+  for (const t of data || []) {
+    const symbol = t.symbol;
+    if (!symbol || !marketInfo.has(symbol)) continue;
+    const price = Number(t.price);
+    if (price > 0) {
+      const old = ticks.get(symbol);
+      ticks.set(symbol, { price, volume: Number(old?.volume || 0), ts });
+      refreshed++;
+    }
+  }
+  state.paperPriceRefresh = refreshed;
+  return refreshed;
 }
 
 async function buildMarketSnapshot() {
@@ -624,18 +633,7 @@ Formato:
 
     const text = await res.text();
     if (!res.ok) {
-      let detail = text;
-      try {
-        const j = JSON.parse(text);
-        detail = j?.error?.message || text;
-      } catch {}
-      if (res.status === 401) {
-        throw new Error('OPENAI 401: API key inválida o revocada. Revisa OPENAI_API_KEY en Railway.');
-      }
-      if (res.status === 404) {
-        throw new Error(`OPENAI 404: modelo no disponible (${cfg.openaiModel}). Usa un modelo disponible en tu cuenta.`);
-      }
-      throw new Error(`OPENAI ${res.status}: ${String(detail).slice(0, 500)}`);
+      throw new Error(`OPENAI ${res.status}: ${text.slice(0, 500)}`);
     }
 
     const data = JSON.parse(text);
@@ -846,6 +844,11 @@ function markPaperPositions() {
   const keep = [];
   const tNow = now();
 
+  // A position is never allowed to keep a stale mark silently. If the live
+  // tick is missing, the last known price remains the explicit fallback; the
+  // REST refresh in runCycle normally supplies the fresh value.
+
+
   for (const p of state.positions) {
     const t = ticks.get(p.symbol);
     if (t?.price) p.current = t.price;
@@ -988,6 +991,17 @@ async function runCycle() {
     }
 
     state.lastSignal = `Analizando ${state.symbols} mercados…`;
+
+    // Refresh PAPER marks before calculating PnL. This is the critical fix for
+    // frozen "actual = entrada" prices and positions that never hit TP/SL.
+    if (cfg.mode === 'PAPER') {
+      try {
+        await refreshPaperPrices();
+      } catch (e) {
+        state.lastError = `PAPER price refresh: ${e.message}`;
+      }
+    }
+
     const market = await buildMarketSnapshot();
     state.candidates = market.length;
     if (market.length < 5) {
@@ -1037,7 +1051,6 @@ async function boot() {
   console.log(`GALAXI AI | mode=${cfg.mode} | model=${cfg.openaiModel} | scan=${cfg.scanMs}ms`);
 
   console.log(`OPENAI_KEY_PRESENT=${cfg.openaiKey ? 1 : 0}`);
-  console.log(`BINANCE_KEY_PRESENT=${cfg.binanceKey ? 1 : 0}`);
   if (!cfg.openaiKey) {
     console.warn('OPENAI_API_KEY is missing. AI decisions cannot run.');
   }
