@@ -1,13 +1,7 @@
 {
-  "name": "galaxi-v38-anomaly-engine",
-  "version": "38.0.0",
-  "private": true,
+  "name": "galaxi-exito-v2",
+  "version": "38.2.1",
   "type": "module",
-  "scripts": {
-    "start": "node index.js",
-    "check": "node --check index.js"
-  },
-  "dependencies": {
-    "ws": "^8.18.0"
-  }
+  "scripts": { "start": "node index.js" },
+  "dependencies": { "ws": "^8.18.0" }
 }
