@@ -4,7 +4,7 @@ import http from 'node:http';
 import WebSocket from 'ws';
 
 /*
- GALAXI V34 · INDEPENDENT 12 EDGE ENGINE
+ GALAXI V35 · EARLY ENTRY · 12 POSITIONS · 6 LONG / 6 SHORT
 
  Objective:
  - Scan the complete Binance USDⓈ-M perpetual USDT universe.
@@ -13,7 +13,7 @@ import WebSocket from 'ws';
  - Combine technical structure + momentum + volume + volatility + OI +
    Binance Top-Trader aggregated behavior.
  - Compare current conditions with GALAXI's own closed-trade pattern memory.
- - Prefer a up to 12 total positions with no LONG/SHORT quota; direction is selected independently per symbol.
+ - Use up to 12 total positions with a strict 6 LONG / 6 SHORT portfolio capacity; each symbol is still evaluated independently.
  - Manage exits deterministically and through the AI.
  - PAPER is the default. LIVE requires TRADING_MODE=LIVE and LIVE_ARMED=true.
 
@@ -42,8 +42,8 @@ const cfg = {
   capital: Number(process.env.PAPER_START_CAPITAL || 10000),
 
   maxPositions: Math.min(12, Math.max(1, Number(process.env.MAX_POSITIONS || 12))),
-  maxLongPositions: Math.min(12, Math.max(0, Number(process.env.MAX_LONG_POSITIONS || 12))),
-  maxShortPositions: Math.min(12, Math.max(0, Number(process.env.MAX_SHORT_POSITIONS || 12))),
+  maxLongPositions: Math.min(6, Math.max(0, Number(process.env.MAX_LONG_POSITIONS || 6))),
+  maxShortPositions: Math.min(6, Math.max(0, Number(process.env.MAX_SHORT_POSITIONS || 6))),
 
   maxTotalMarginPct: Math.min(50, Math.max(1, Number(process.env.MAX_TOTAL_MARGIN_PCT || 30))),
   maxPositionMarginPct: Math.min(5, Math.max(0.25, Number(process.env.MAX_POSITION_MARGIN_PCT || 2))),
@@ -63,6 +63,11 @@ const cfg = {
   marketConcurrency: Math.min(8, Math.max(2, Number(process.env.MARKET_CONCURRENCY || 5))),
   behaviorConcurrency: Math.min(8, Math.max(2, Number(process.env.BEHAVIOR_CONCURRENCY || 6))),
   edgeCacheMs: Math.max(10000, Number(process.env.EDGE_CACHE_MS || 30000)),
+  earlyEntryEnabled: String(process.env.EARLY_ENTRY_ENABLED || 'true').toLowerCase() === 'true',
+  earlyImpulseMinPct: Number(process.env.EARLY_IMPULSE_MIN_PCT || 0.08),
+  earlyVolumeRatio: Number(process.env.EARLY_VOLUME_RATIO || 1.20),
+  earlyBreakoutBonus: Number(process.env.EARLY_BREAKOUT_BONUS || 16),
+  lateExtensionPct: Number(process.env.LATE_EXTENSION_PCT || 1.20),
   restTimeoutMs: Math.max(5000, Number(process.env.REST_TIMEOUT_MS || 12000)),
 
   // Expected net edge after estimated round-trip fees.
@@ -71,12 +76,16 @@ const cfg = {
 
   maxDailyLossPct: Math.min(20, Math.max(0.5, Number(process.env.MAX_DAILY_LOSS_PCT || 5))),
   maxDrawdownPct: Math.min(30, Math.max(1, Number(process.env.MAX_DRAWDOWN_PCT || 10))),
-  minSecondsBetweenOrders: Math.max(2, Number(process.env.MIN_SECONDS_BETWEEN_ORDERS || 5)),
+  minSecondsBetweenOrders: Math.max(2, Number(process.env.MIN_SECONDS_BETWEEN_ORDERS || 2)),
   maxActionsPerCycle: Math.min(12, Math.max(1, Number(process.env.MAX_ACTIONS_PER_CYCLE || 12))),
 
-  paperTpPct: Number(process.env.PAPER_TP_PCT || 0.90),
-  paperSlPct: Number(process.env.PAPER_SL_PCT || 0.65),
-  paperMaxHoldMs: Number(process.env.PAPER_MAX_HOLD_MS || 1200000), // 20 min
+  paperTpPct: Number(process.env.PAPER_TP_PCT || 0.60),
+  paperSlPct: Number(process.env.PAPER_SL_PCT || 0.55),
+  paperMaxHoldMs: Number(process.env.PAPER_MAX_HOLD_MS || 600000), // 10 min
+  paperProfitTakeUsd: Number(process.env.PAPER_PROFIT_TAKE_USD || 8),
+  paperProfitLockTriggerPct: Number(process.env.PAPER_PROFIT_LOCK_TRIGGER_PCT || 0.25),
+  paperProfitGivebackPct: Number(process.env.PAPER_PROFIT_GIVEBACK_PCT || 0.12),
+  paperMinLockedPct: Number(process.env.PAPER_MIN_LOCKED_PCT || 0.08),
 
   learningMaxTrades: Math.min(2000, Math.max(100, Number(process.env.LEARNING_MAX_TRADES || 500))),
   learningMinSamples: Math.min(50, Math.max(5, Number(process.env.LEARNING_MIN_SAMPLES || 8)))
@@ -94,11 +103,11 @@ function htmlEscape(value) {
 
 function dashboardHtml() {
   const positions = Array.isArray(state.positions) ? state.positions : [];
-  const rows = positions.map(p => `<tr><td>${htmlEscape(p.symbol)}</td><td>${htmlEscape(p.side)}</td><td>${Number(p.entry || 0).toFixed(6)}</td><td>${Number(p.mark || p.current || 0).toFixed(6)}</td><td>${Number(p.pnl || 0).toFixed(2)}</td></tr>`).join('');
+  const rows = positions.map(p => `<tr><td>${htmlEscape(p.symbol)}</td><td>${htmlEscape(p.side)}</td><td>${Number(p.entry || 0).toFixed(6)}</td><td>${Number(p.mark || p.current || 0).toFixed(6)}</td><td>${Number(p.pnl || 0).toFixed(2)}</td><td>${Number(p.peakPnl || 0).toFixed(2)}</td><td>${Math.round((now() - Number(p.openedTs || now())) / 1000)}s</td></tr>`).join('');
   const e = state.edgeScanner || {};
   const fmt = x => x == null ? '—' : Number(x).toFixed(2);
   const topRows = (Array.isArray(state.ranking) ? state.ranking.slice(0, 8) : []).map(x => `<tr><td>${htmlEscape(x.symbol)}</td><td>${htmlEscape(x.preferredSide || '—')}</td><td>${fmt(x.edgeScore)}</td><td>${fmt(x.edgeLong)}</td><td>${fmt(x.edgeShort)}</td><td>${htmlEscape(x.behavior?.side || 'MIXTO')}</td><td>${fmt(x.premium?.fundingRatePct)}%</td><td>${fmt(x.openInterestChangePct)}%</td></tr>`).join('');
-  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GALAXI V34 · INDEPENDENT 12 EDGE TERMINAL</title><meta http-equiv="refresh" content="10"><style>body{font-family:system-ui;background:#080b10;color:#eee;margin:0;padding:18px}main{max-width:1100px;margin:auto}.top{display:flex;justify-content:space-between;gap:12px;align-items:end;margin-bottom:16px}.sub{color:#8b949e}.pill{border:1px solid #2f81f7;border-radius:999px;padding:5px 10px;color:#58a6ff;font-size:12px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px}.card{background:#11161d;border:1px solid #252d38;border-radius:12px;padding:14px}.k{color:#8b949e;font-size:12px}.v{font-size:22px;font-weight:750;margin-top:5px}.section{margin-top:18px}.scanner{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px}.edge{background:#0f151c;border:1px solid #26303c;border-radius:12px;padding:14px}.edge b{font-size:20px}.muted{color:#8b949e;font-size:12px}.good{color:#3fb950}.warn{color:#d29922}table{width:100%;border-collapse:collapse;margin-top:10px;background:#11161d;border:1px solid #252d38;border-radius:12px;overflow:hidden}th,td{text-align:left;padding:9px;border-bottom:1px solid #252d38;font-size:13px}a{color:#58a6ff}.tag{display:inline-block;padding:2px 7px;border-radius:999px;background:#1b2330;color:#c9d1d9;font-size:11px;margin-right:4px}</style></head><body><main><div class="top"><div><h1 style="margin:0">GALAXI V34 · INDEPENDENT 12 EDGE TERMINAL</h1><div class="sub">${htmlEscape(state.mode)} · IA ${htmlEscape(state.aiModel)} · ciclo ${state.cycle}</div></div><span class="pill">${state.wsConnected ? 'BINANCE LIVE DATA' : 'BINANCE DESCONECTADO'}</span></div><div class="grid"><div class="card"><div class="k">Equity</div><div class="v">$${Number(state.equity).toFixed(2)}</div></div><div class="card"><div class="k">Net PnL</div><div class="v">$${Number(state.realizedPnl + state.unrealizedPnl).toFixed(2)}</div></div><div class="card"><div class="k">Mercados</div><div class="v">${state.symbols}</div></div><div class="card"><div class="k">Deep / IA</div><div class="v">${state.deepScanned} / ${state.candidates}</div></div><div class="card"><div class="k">IA calls / errores</div><div class="v">${state.aiCalls} / ${state.aiErrors}</div></div><div class="card"><div class="k">Top Trader coverage</div><div class="v">${state.behaviorCoverage}%</div></div><div class="card"><div class="k">Edge tradeable</div><div class="v">${e.tradeableCount || 0}</div></div><div class="card"><div class="k">Posiciones</div><div class="v">${positions.length} · L${state.longOpen}/S${state.shortOpen}</div></div></div><div class="section"><h2>EDGE SCANNER</h2><div class="scanner"><div class="edge"><div class="muted">MEJOR LONG</div><b>${htmlEscape(e.bestLong?.symbol || '—')}</b><div>Score <span class="good">${fmt(e.bestLong?.score)}</span></div><div class="muted">Trader ${htmlEscape(e.bestLong?.behavior || '—')} · funding ${fmt(e.bestLong?.funding)}% · basis ${fmt(e.bestLong?.basis)}%</div></div><div class="edge"><div class="muted">MEJOR SHORT</div><b>${htmlEscape(e.bestShort?.symbol || '—')}</b><div>Score <span class="good">${fmt(e.bestShort?.score)}</span></div><div class="muted">Trader ${htmlEscape(e.bestShort?.behavior || '—')} · funding ${fmt(e.bestShort?.funding)}% · basis ${fmt(e.bestShort?.basis)}%</div></div><div class="edge"><div class="muted">MEJOR OPORTUNIDAD</div><b>${htmlEscape(e.bestOverall?.symbol || '—')} ${htmlEscape(e.bestOverall?.side || '')}</b><div>Score <span class="good">${fmt(e.bestOverall?.score)}</span></div><div class="muted">Observados ${e.watchedCount || 0} · promedio ${fmt(e.avgEdge)}</div></div></div></div><div class="section"><h2>EDGE LEADERBOARD</h2><table><thead><tr><th>Símbolo</th><th>Sesgo</th><th>Edge</th><th>Long</th><th>Short</th><th>Top Trader</th><th>Funding</th><th>OI 5m</th></tr></thead><tbody>${topRows || '<tr><td colspan=8>Esperando scanner</td></tr>'}</tbody></table></div><div class="section"><h2>Posiciones</h2><table><thead><tr><th>Símbolo</th><th>Lado</th><th>Entrada</th><th>Mark</th><th>PnL</th></tr></thead><tbody>${rows || '<tr><td colspan=5>Sin posiciones abiertas</td></tr>'}</tbody></table></div><div class="section muted">Régimen: <span class="tag">${htmlEscape(state.regime)}</span> Comportamiento: <span class="tag">${htmlEscape(state.behaviorBias)}</span> · Confianza ${state.behaviorConfidence}% · <a href="/health">health</a> · <a href="/state">state</a></div></main></body></html>`;
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GALAXI V35 · 12 POSITIONS · 6 LONG / 6 SHORT</title><meta http-equiv="refresh" content="10"><style>body{font-family:system-ui;background:#080b10;color:#eee;margin:0;padding:18px}main{max-width:1100px;margin:auto}.top{display:flex;justify-content:space-between;gap:12px;align-items:end;margin-bottom:16px}.sub{color:#8b949e}.pill{border:1px solid #2f81f7;border-radius:999px;padding:5px 10px;color:#58a6ff;font-size:12px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px}.card{background:#11161d;border:1px solid #252d38;border-radius:12px;padding:14px}.k{color:#8b949e;font-size:12px}.v{font-size:22px;font-weight:750;margin-top:5px}.section{margin-top:18px}.scanner{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px}.edge{background:#0f151c;border:1px solid #26303c;border-radius:12px;padding:14px}.edge b{font-size:20px}.muted{color:#8b949e;font-size:12px}.good{color:#3fb950}.warn{color:#d29922}table{width:100%;border-collapse:collapse;margin-top:10px;background:#11161d;border:1px solid #252d38;border-radius:12px;overflow:hidden}th,td{text-align:left;padding:9px;border-bottom:1px solid #252d38;font-size:13px}a{color:#58a6ff}.tag{display:inline-block;padding:2px 7px;border-radius:999px;background:#1b2330;color:#c9d1d9;font-size:11px;margin-right:4px}</style></head><body><main><div class="top"><div><h1 style="margin:0">GALAXI V35 · 12 POSITIONS · 6 LONG / 6 SHORT</h1><div class="sub">${htmlEscape(state.mode)} · IA ${htmlEscape(state.aiModel)} · ciclo ${state.cycle}</div></div><span class="pill">${state.wsConnected ? 'BINANCE LIVE DATA' : 'BINANCE DESCONECTADO'}</span></div><div class="grid"><div class="card"><div class="k">Equity</div><div class="v">$${Number(state.equity).toFixed(2)}</div></div><div class="card"><div class="k">Net PnL</div><div class="v">$${Number(state.realizedPnl + state.unrealizedPnl).toFixed(2)}</div></div><div class="card"><div class="k">Mercados</div><div class="v">${state.symbols}</div></div><div class="card"><div class="k">Deep / IA</div><div class="v">${state.deepScanned} / ${state.candidates}</div></div><div class="card"><div class="k">IA calls / errores</div><div class="v">${state.aiCalls} / ${state.aiErrors}</div></div><div class="card"><div class="k">Top Trader coverage</div><div class="v">${state.behaviorCoverage}%</div></div><div class="card"><div class="k">Edge tradeable</div><div class="v">${e.tradeableCount || 0}</div></div><div class="card"><div class="k">Posiciones</div><div class="v">${positions.length} · L${state.longOpen}/S${state.shortOpen}</div></div></div><div class="section"><h2>EDGE SCANNER</h2><div class="scanner"><div class="edge"><div class="muted">MEJOR LONG</div><b>${htmlEscape(e.bestLong?.symbol || '—')}</b><div>Score <span class="good">${fmt(e.bestLong?.score)}</span></div><div class="muted">Trader ${htmlEscape(e.bestLong?.behavior || '—')} · funding ${fmt(e.bestLong?.funding)}% · basis ${fmt(e.bestLong?.basis)}%</div></div><div class="edge"><div class="muted">MEJOR SHORT</div><b>${htmlEscape(e.bestShort?.symbol || '—')}</b><div>Score <span class="good">${fmt(e.bestShort?.score)}</span></div><div class="muted">Trader ${htmlEscape(e.bestShort?.behavior || '—')} · funding ${fmt(e.bestShort?.funding)}% · basis ${fmt(e.bestShort?.basis)}%</div></div><div class="edge"><div class="muted">MEJOR OPORTUNIDAD</div><b>${htmlEscape(e.bestOverall?.symbol || '—')} ${htmlEscape(e.bestOverall?.side || '')}</b><div>Score <span class="good">${fmt(e.bestOverall?.score)}</span></div><div class="muted">Observados ${e.watchedCount || 0} · promedio ${fmt(e.avgEdge)}</div></div></div></div><div class="section"><h2>EDGE LEADERBOARD</h2><table><thead><tr><th>Símbolo</th><th>Sesgo</th><th>Edge</th><th>Long</th><th>Short</th><th>Top Trader</th><th>Funding</th><th>OI 5m</th></tr></thead><tbody>${topRows || '<tr><td colspan=8>Esperando scanner</td></tr>'}</tbody></table></div><div class="section"><h2>Posiciones</h2><table><thead><tr><th>Símbolo</th><th>Lado</th><th>Entrada</th><th>Mark</th><th>PnL</th><th>Pico</th><th>Edad</th></tr></thead><tbody>${rows || '<tr><td colspan=7>Sin posiciones abiertas</td></tr>'}</tbody></table></div><div class="section muted">Régimen: <span class="tag">${htmlEscape(state.regime)}</span> Comportamiento: <span class="tag">${htmlEscape(state.behaviorBias)}</span> · Confianza ${state.behaviorConfidence}% · <a href="/health">health</a> · <a href="/state">state</a></div></main></body></html>`;
 }
 
 const webServer = http.createServer((req, res) => {
@@ -183,6 +192,7 @@ const state = {
   lastError: null,
   aiDecision: null,
   aiReasoning: '',
+  lastExit: null,
 
   aiCalls: 0,
   aiErrors: 0,
@@ -199,6 +209,7 @@ const marketInfo = new Map();
 const behaviorCache = new Map();
 const openInterestCache = new Map();
 const premiumCache = new Map();
+const scanMicro = new Map();
 
 let learningTrades = [];
 let ws = null;
@@ -563,8 +574,23 @@ function analyzeKlines(symbol, k1, k5) {
   const e20_5 = ema(closes5.slice(-40), 20);
   const e50_5 = ema(closes5.slice(-70), 50);
 
-  const recentHigh = Math.max(...highs1.slice(-20));
-  const recentLow = Math.min(...lows1.slice(-20));
+  // Use completed candles for breakout detection so the signal can fire at
+  // the beginning of a move instead of waiting for a fully formed candle.
+  const completedHighs = highs1.slice(-21, -1);
+  const completedLows = lows1.slice(-21, -1);
+  const recentHigh = Math.max(...completedHighs);
+  const recentLow = Math.min(...completedLows);
+
+  const prevScan = scanMicro.get(symbol);
+  const tsNow = now();
+  const elapsedMin = prevScan?.ts ? Math.max(1 / 60, (tsNow - prevScan.ts) / 60000) : 1 / 3;
+  const microMovePct = prevScan?.price ? (price / prevScan.price - 1) * 100 : 0;
+  const microVelocityPctPerMin = microMovePct / elapsedMin;
+  const priorVelocity = Number(prevScan?.velocity || 0);
+  const microAcceleration = microVelocityPctPerMin - priorVelocity;
+  const freshBreakoutUp = price > recentHigh && m1 > 0 && volumeRatio >= cfg.earlyVolumeRatio;
+  const freshBreakoutDown = price < recentLow && m1 < 0 && volumeRatio >= cfg.earlyVolumeRatio;
+  scanMicro.set(symbol, { price, ts: tsNow, velocity: microVelocityPctPerMin });
 
   const bull =
     e9 > e21 &&
@@ -600,8 +626,17 @@ function analyzeKlines(symbol, k1, k5) {
     ema20_5m: round(e20_5, 8),
     ema50_5m: round(e50_5, 8),
 
-    breakoutUp: price > recentHigh * 0.9995,
-    breakoutDown: price < recentLow * 1.0005,
+    breakoutUp: freshBreakoutUp || price > recentHigh * 0.9995,
+    breakoutDown: freshBreakoutDown || price < recentLow * 1.0005,
+    freshBreakoutUp,
+    freshBreakoutDown,
+    microMovePct: round(microMovePct, 4),
+    microVelocityPctPerMin: round(microVelocityPctPerMin, 4),
+    microAcceleration: round(microAcceleration, 4),
+    earlyStageLong: Boolean(freshBreakoutUp || (microVelocityPctPerMin >= cfg.earlyImpulseMinPct && m5 >= 0)),
+    earlyStageShort: Boolean(freshBreakoutDown || (microVelocityPctPerMin <= -cfg.earlyImpulseMinPct && m5 <= 0)),
+    distanceFromHighPct: recentHigh ? round((price / recentHigh - 1) * 100, 4) : 0,
+    distanceFromLowPct: recentLow ? round((price / recentLow - 1) * 100, 4) : 0,
     high20: recentHigh,
     low20: recentLow,
 
@@ -726,6 +761,7 @@ async function fetchPremiumIndex(symbol) {
 
 function edgeForSide(row, side) {
   const dir = side === 'LONG' ? 1 : -1;
+  const m1 = Number(row.momentum1m || 0) * dir;
   const m5 = Number(row.momentum5m || 0) * dir;
   const m15 = Number(row.momentum15m || 0) * dir;
   const m30 = Number(row.momentum30m || 0) * dir;
@@ -745,7 +781,19 @@ function edgeForSide(row, side) {
   const flowScore = clamp(volume * 7, 0, 10);
   const crowdingScore = clamp(funding * 4 + basis * 3, 0, 10);
 
-  const total = clamp(techScore + biasScore + behaviorScore + oiScore + flowScore + crowdingScore, 0, 100);
+  // Early-entry layer: reward the beginning of an impulse/fresh breakout and
+  // penalize entries that are already extended. This is deliberately symmetric
+  // for LONG and SHORT; no global market regime can select the side.
+  const early = side === 'LONG'
+    ? (row.earlyStageLong ? cfg.earlyBreakoutBonus : 0)
+    : (row.earlyStageShort ? cfg.earlyBreakoutBonus : 0);
+  const velocity = Number(row.microVelocityPctPerMin || 0) * dir;
+  const acceleration = Number(row.microAcceleration || 0) * dir;
+  const impulseScore = clamp(velocity * 18 + acceleration * 8, 0, 8);
+  const move15 = Math.max(0, m15);
+  const extension = move15 >= cfg.lateExtensionPct ? clamp((move15 - cfg.lateExtensionPct) * 5, 0, 12) : 0;
+
+  const total = clamp(techScore + biasScore + behaviorScore + oiScore + flowScore + crowdingScore + early + impulseScore - extension, 0, 100);
   return round(total, 2);
 }
 
@@ -1011,9 +1059,13 @@ function riskAllowsOpen(symbol, margin, side) {
   if (stopped) return { ok: false, reason: 'STOP' };
   if (state.positions.length >= cfg.maxPositions) return { ok: false, reason: 'MAX_POSITIONS' };
 
-  // Direction is independent per symbol. There is NO global LONG/SHORT quota and
-  // NO 50/50 requirement. The only portfolio slot limit is maxPositions=12;
-  // LONG and SHORT compete independently across the 528-symbol universe.
+  // Portfolio capacity is strict: max 6 LONG + max 6 SHORT = 12 total.
+  // The direction is still chosen independently for each symbol; global regime
+  // and Top Trader bias never force the side.
+  const openLongs = state.positions.filter(p => p.side === 'LONG').length;
+  const openShorts = state.positions.filter(p => p.side === 'SHORT').length;
+  if (side === 'LONG' && openLongs >= cfg.maxLongPositions) return { ok: false, reason: 'MAX_LONG_POSITIONS' };
+  if (side === 'SHORT' && openShorts >= cfg.maxShortPositions) return { ok: false, reason: 'MAX_SHORT_POSITIONS' };
 
   const totalMargin = state.positions.reduce((s, p) => s + Number(p.margin || 0), 0);
   const maxTotal = state.equity * cfg.maxTotalMarginPct / 100;
@@ -1115,6 +1167,15 @@ async function askAI(market, account) {
       volumeRatio: x.volumeRatio,
       breakoutUp: x.breakoutUp,
       breakoutDown: x.breakoutDown,
+      freshBreakoutUp: x.freshBreakoutUp,
+      freshBreakoutDown: x.freshBreakoutDown,
+      earlyStageLong: x.earlyStageLong,
+      earlyStageShort: x.earlyStageShort,
+      microMovePct: x.microMovePct,
+      microVelocityPctPerMin: x.microVelocityPctPerMin,
+      microAcceleration: x.microAcceleration,
+      distanceFromHighPct: x.distanceFromHighPct,
+      distanceFromLowPct: x.distanceFromLowPct,
       edgeScore: x.edgeScore,
       edgeLong: x.edgeLong,
       edgeShort: x.edgeShort,
@@ -1152,7 +1213,10 @@ async function askAI(market, account) {
       longs,
       shorts,
       slotsRemaining: Math.max(0, cfg.maxPositions - positions.length),
-      directionPolicy: 'INDEPENDIENTE: LONG y SHORT compiten por las 12 plazas sin cuota ni objetivo 50/50'
+      directionPolicy: 'CAPACIDAD 6 LONG + 6 SHORT: objetivo 50/50 cuando existan oportunidades válidas; nunca forzar una entrada'
+      ,maxLongPositions: cfg.maxLongPositions
+      ,maxShortPositions: cfg.maxShortPositions
+      ,profitTakeUsd: cfg.paperProfitTakeUsd
     },
 
     marketCoverage: {
@@ -1204,13 +1268,14 @@ individuales. Úsalos como señal de comportamiento colectivo y no como copia ci
 PORTFOLIO / DIRECCIÓN:
 - El universo operativo es el mercado completo de Binance (todos los símbolos cargados; actualmente ~528).
 - GALAXI dispone de hasta ${cfg.maxPositions} posiciones simultáneas.
-- NO existe objetivo 50/50 y NO existe cuota LONG/SHORT.
+- La cartera tiene 12 plazas: máximo 6 LONG y máximo 6 SHORT.
+- El objetivo de cartera es 6 LONG + 6 SHORT cuando existan suficientes oportunidades válidas; NO inventes operaciones para llenar una plaza.
 - Cada símbolo se evalúa de forma independiente en LONG y SHORT.
 - El régimen global (ALCISTA/BAJISTA/MIXTO) es contexto, NUNCA una instrucción de dirección.
 - El sesgo agregado de Top Traders es una señal por símbolo, NUNCA una orden global de comprar o vender.
-- Si hay 8 LONG válidos y 4 SHORT válidos, puede mantener 8L/4S; si hay 2L/10S, puede mantener 2L/10S.
-- No fuerces equilibrio ni abras una operación sólo para llenar 12 posiciones.
-- Selecciona hasta 12 operaciones con expectativa neta positiva, independientemente del lado.
+- Si ya hay 6 LONG, no abras más LONG; busca SHORT. Si ya hay 6 SHORT, no abras más SHORT.
+- Si hay oportunidades válidas en ambos lados, completa progresivamente hacia 6L/6S.
+- No abras una operación sólo para llenar una plaza: cada operación debe superar los filtros de entrada.
 
 ENTRADA:
 - Sólo OPEN_LONG/OPEN_SHORT cuando la tesis individual del símbolo esté confirmada.
@@ -1218,13 +1283,17 @@ ENTRADA:
 - No compares las direcciones a nivel global para descartar una de ellas: un LONG de un símbolo puede coexistir con un SHORT de otro.
 - Prefiere oportunidades con edge, expectativa neta, liquidez, comportamiento, OI y estructura que coincidan.
 - expected_net_pct debe superar ${cfg.minExpectedNetPct}% después de comisiones.
-- Evita entradas tardías cuando el movimiento ya está demasiado extendido.
+- PRIORIDAD DE TIMING: busca el inicio del movimiento. Usa freshBreakout, microVelocity, microAcceleration, volumen y momentum 1m/5m para entrar en los primeros momentos cuando la señal recién se confirma.
+- Evita entradas tardías cuando el movimiento ya está demasiado extendido; un score alto por sí solo NO justifica perseguir una vela ya corrida.
 - No repitas una moneda sólo porque funcionó antes.
 - Las monedas nuevas y memecoins compiten por mérito; no reciben una operación automática.
 - No uses el precio nominal de una moneda como criterio de oportunidad.
 
 SALIDA:
 - CLOSE tiene prioridad sobre nuevas entradas.
+- TAKE PROFIT DURO: cuando el PnL neto de una posición alcance +$8, ciérrala inmediatamente y toma la utilidad.
+- GESTIÓN ACTIVA DE GANANCIA: si una posición entra en beneficio y el impulso empieza a revertirse, prioriza proteger la ganancia en vez de esperar pasivamente al máximo tiempo.
+- Si una posición tuvo un beneficio relevante y pierde momentum 1m/5m, considera CLOSE aunque todavía no haya alcanzado el TP máximo.
 - Cierra si la tesis se invalida, si el comportamiento/estructura cambia de forma clara,
   o si la expectativa futura deja de justificar mantener la posición.
 - No mantengas una posición sólo para evitar reconocer una pérdida.
@@ -1466,7 +1535,10 @@ function paperOpen(a, marketRow) {
     },
 
     openedAt: new Date().toISOString(),
-    openedTs: now()
+    openedTs: now(),
+    peakPnl: -entryFee,
+    peakUnrealizedPct: -entryFee / margin * 100,
+    profitLockActive: false
   };
 
   state.positions.push(p);
@@ -1518,8 +1590,9 @@ function paperClose(a, reasonOverride = null) {
     reason
   });
 
+  state.lastExit = { symbol: p.symbol, side: p.side, pnl: round(p.pnl, 4), reason, peakPnl: round(p.peakPnl || p.pnl, 4), time: new Date().toISOString() };
   state.lastSignal =
-    `AI PAPER CLOSE ${p.symbol} ${p.side} · PnL ${p.pnl.toFixed(2)} · ${reason}`;
+    `AI PAPER CLOSE ${p.symbol} ${p.side} · PnL ${p.pnl.toFixed(2)} · pico ${Number(p.peakPnl || p.pnl).toFixed(2)} · ${reason}`;
 
   return { closed: true };
 }
@@ -1527,6 +1600,7 @@ function paperClose(a, reasonOverride = null) {
 function markPaperPositions(market) {
   const keep = [];
   const tNow = now();
+  const marketMap = new Map((market || []).map(x => [x.symbol, x]));
 
   for (const p of state.positions) {
     const t = ticks.get(p.symbol);
@@ -1538,30 +1612,42 @@ function markPaperPositions(market) {
 
     const grossPnl = move * p.qty;
     p.pnl = grossPnl - p.fees;
-
     p.unrealizedPct = p.margin ? p.pnl / p.margin * 100 : 0;
+
+    p.peakPnl = Math.max(Number(p.peakPnl ?? p.pnl), Number(p.pnl));
+    p.peakUnrealizedPct = Math.max(Number(p.peakUnrealizedPct ?? p.unrealizedPct), Number(p.unrealizedPct));
+    if (p.peakUnrealizedPct >= cfg.paperProfitLockTriggerPct) p.profitLockActive = true;
 
     const age = tNow - p.openedTs;
     const tp = p.unrealizedPct >= cfg.paperTpPct;
     const sl = p.unrealizedPct <= -cfg.paperSlPct;
     const timeout = age >= cfg.paperMaxHoldMs;
+    const cashTake = p.pnl >= cfg.paperProfitTakeUsd;
+    const giveback = p.profitLockActive &&
+      p.unrealizedPct <= p.peakUnrealizedPct - cfg.paperProfitGivebackPct &&
+      p.unrealizedPct >= cfg.paperMinLockedPct;
 
-    // If price data disappeared, never force a close from a fake price.
+    const row = marketMap.get(p.symbol);
+    const m1 = Number(row?.momentum1m || 0);
+    const m5 = Number(row?.momentum5m || 0);
+    const reversal = p.profitLockActive && p.pnl > 0 && (
+      (p.side === 'LONG' && m1 < -0.10 && m5 < -0.03) ||
+      (p.side === 'SHORT' && m1 > 0.10 && m5 > 0.03)
+    );
+
     if (!Number.isFinite(p.current) || p.current <= 0) {
       keep.push(p);
       continue;
     }
 
-    if (tp || sl || timeout) {
-      const reason = tp ? 'TP' : sl ? 'SL' : 'TIME';
+    if (tp || cashTake || giveback || reversal || sl || timeout) {
+      const reason = cashTake ? 'PROFIT_USD' : tp ? 'TP' : giveback ? 'PROFIT_LOCK' : reversal ? 'MOMENTUM_REVERSAL' : sl ? 'SL' : 'TIME';
       paperClose({ symbol: p.symbol, reason }, reason);
     } else {
       keep.push(p);
     }
   }
 
-  // paperClose mutates state.positions, so only restore the positions that
-  // survived. This also guarantees deterministic exit handling.
   const openIds = new Set(keep.map(x => x.id));
   state.positions = state.positions.filter(x => openIds.has(x.id));
 }

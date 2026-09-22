@@ -36,3 +36,6 @@ RAILWAY
 - /health
 - /state
 - Dashboard en /
+
+
+V35 PATCH: capacidad máxima 12 posiciones con 6 LONG + 6 SHORT; objetivo 50/50 sin forzar entradas. PAPER take-profit duro en +$8 netos.
