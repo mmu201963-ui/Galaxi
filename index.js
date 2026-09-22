@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import WebSocket from 'ws';
 
 /*
-GALAXI AI TRADER
+GALAXI V24 AI DIAGNOSTIC
 - Real-time Binance USD-M Futures market data
 - AI decision engine through OpenAI Responses API
 - PAPER by default
@@ -19,7 +19,7 @@ const cfg = {
   mode: String(process.env.TRADING_MODE || 'PAPER').toUpperCase(),
   liveArmed: String(process.env.LIVE_ARMED || 'false').toLowerCase() === 'true',
   openaiKey: process.env.OPENAI_API_KEY || '',
-  openaiModel: process.env.OPENAI_MODEL || 'gpt-5.6',
+  openaiModel: process.env.OPENAI_MODEL || 'gpt-5.6-luna',
   binanceKey: process.env.BINANCE_API_KEY || '',
   binanceSecret: process.env.BINANCE_API_SECRET || '',
   binanceBase: process.env.BINANCE_FAPI_BASE || 'https://fapi.binance.com',
@@ -91,7 +91,14 @@ const state = {
   aiDecision: null,
   aiReasoning: '',
   aiCalls: 0,
+  aiAttempts: 0,
+  aiSuccess: 0,
   aiErrors: 0,
+  aiReady: false,
+  aiStatus: 'INICIANDO',
+  aiLastError: null,
+  aiLastCallAt: null,
+  aiLatencyMs: 0,
   restCalls: 0,
   rate429: 0,
   rate418: 0,
@@ -496,7 +503,23 @@ async function buildMarketSnapshot() {
 }
 
 async function askAI(market, account) {
-  if (!cfg.openaiKey) throw new Error('OPENAI_API_KEY no configurada');
+  state.aiAttempts++;
+  state.aiLastCallAt = new Date().toISOString();
+  state.aiStatus = 'LLAMANDO IA';
+  if (!cfg.openaiKey) {
+    state.aiReady = false;
+    state.aiStatus = 'SIN API KEY';
+    state.aiLastError = 'OPENAI_API_KEY no configurada';
+    throw new Error('OPENAI_API_KEY no configurada');
+  }
+  const key = String(cfg.openaiKey).trim();
+  if (/[^\x00-\x7F]/.test(key)) {
+    state.aiReady = false;
+    state.aiStatus = 'API KEY INVÁLIDA';
+    state.aiLastError = 'OPENAI_API_KEY contiene caracteres no ASCII';
+    throw new Error('OPENAI_API_KEY contiene caracteres no ASCII');
+  }
+  const startedAt = Date.now();
 
   const positions = (account.positions || []).map(p => ({
     symbol: p.symbol,
@@ -593,7 +616,7 @@ Formato:
       method: 'POST',
       signal: controller.signal,
       headers: {
-        'Authorization': `Bearer ${cfg.openaiKey}`,
+        'Authorization': `Bearer ${key}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -638,6 +661,9 @@ Formato:
 
     const text = await res.text();
     if (!res.ok) {
+      state.aiReady = false;
+      state.aiStatus = `ERROR ${res.status}`;
+      state.aiLastError = `OPENAI ${res.status}: ${text.slice(0, 700)}`;
       throw new Error(`OPENAI ${res.status}: ${text.slice(0, 500)}`);
     }
 
@@ -645,9 +671,26 @@ Formato:
     const outputText = data.output_text ||
       data.output?.flatMap(x => x.content || []).find(x => x.type === 'output_text')?.text || '';
 
+    if (!outputText) {
+      state.aiReady = false;
+      state.aiStatus = 'RESPUESTA VACÍA';
+      state.aiLastError = 'OpenAI respondió sin output_text';
+      throw new Error('OpenAI respondió sin output_text');
+    }
     const decision = JSON.parse(cleanJsonText(outputText));
     state.aiCalls++;
+    state.aiSuccess++;
+    state.aiReady = true;
+    state.aiStatus = 'CONECTADA';
+    state.aiLastError = null;
+    state.aiLatencyMs = Date.now() - startedAt;
     return decision;
+  } catch (e) {
+    state.aiErrors++;
+    state.aiReady = false;
+    if (!state.aiLastError) state.aiLastError = e?.message || String(e);
+    if (e?.name === 'AbortError') state.aiStatus = 'TIMEOUT';
+    throw e;
   } finally {
     clearTimeout(timer);
   }
@@ -993,6 +1036,49 @@ function connect() {
   }
 }
 
+
+async function checkOpenAI() {
+  if (!cfg.openaiKey) {
+    state.aiStatus = 'SIN API KEY';
+    state.aiReady = false;
+    state.aiLastError = 'OPENAI_API_KEY no configurada';
+    return false;
+  }
+  const key = String(cfg.openaiKey).trim();
+  if (/[^\x00-\x7F]/.test(key)) {
+    state.aiStatus = 'API KEY INVÁLIDA';
+    state.aiReady = false;
+    state.aiLastError = 'OPENAI_API_KEY contiene caracteres no ASCII';
+    return false;
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.min(cfg.aiTimeoutMs, 10000));
+  try {
+    const res = await fetch('https://api.openai.com/v1/models/' + encodeURIComponent(cfg.openaiModel), {
+      headers: { Authorization: `Bearer ${key}` },
+      signal: controller.signal
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      state.aiStatus = `MODELO NO DISPONIBLE ${res.status}`;
+      state.aiReady = false;
+      state.aiLastError = `OPENAI MODEL CHECK ${res.status}: ${text.slice(0, 500)}`;
+      return false;
+    }
+    state.aiReady = true;
+    state.aiStatus = 'MODELO DISPONIBLE';
+    state.aiLastError = null;
+    return true;
+  } catch (e) {
+    state.aiReady = false;
+    state.aiStatus = e?.name === 'AbortError' ? 'CHECK TIMEOUT' : 'CHECK ERROR';
+    state.aiLastError = e?.message || String(e);
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function runCycle() {
   if (loopBusy || stopped) return;
   loopBusy = true;
@@ -1055,7 +1141,6 @@ async function runCycle() {
       );
     }
   } catch (e) {
-    state.aiErrors += 1;
     state.lastError = e?.message || String(e);
     console.error('CYCLE_ERROR', state.lastError);
   } finally {
@@ -1068,6 +1153,7 @@ async function boot() {
   console.log(`GALAXI AI | mode=${cfg.mode} | model=${cfg.openaiModel} | scan=${cfg.scanMs}ms`);
 
   console.log(`OPENAI_KEY_PRESENT=${cfg.openaiKey ? 1 : 0}`);
+  console.log(`OPENAI_MODEL=${cfg.openaiModel}`);
   if (!cfg.openaiKey) {
     console.warn('OPENAI_API_KEY is missing. AI decisions cannot run.');
   }
@@ -1078,6 +1164,7 @@ async function boot() {
 
   await syncServerTime();
   await loadExchangeInfo();
+  await checkOpenAI();
   connect();
 
   // Let the WS warm up before the first AI call.

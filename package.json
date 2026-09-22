@@ -1,12 +1,7 @@
 {
-  "name": "galaxi-v22-final",
-  "version": "22.1.0",
-  "private": true,
+  "name": "galaxi-v24-ai-diagnostic",
+  "version": "24.0.0",
   "type": "module",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "dependencies": {
-    "ws": "^8.18.3"
-  }
+  "scripts": {"start":"node server.js"},
+  "dependencies": {"ws":"^8.18.0"}
 }
