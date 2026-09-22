@@ -4,7 +4,7 @@ import http from 'node:http';
 import WebSocket from 'ws';
 
 /*
- GALAXI V35 · EARLY ENTRY · 12 POSITIONS · 6 LONG / 6 SHORT
+ GALAXI V38 · ANOMALY ENGINE · 12 POSITIONS · 6 LONG / 6 SHORT
 
  Objective:
  - Scan the complete Binance USDⓈ-M perpetual USDT universe.
@@ -38,6 +38,7 @@ const cfg = {
   binanceSecret: process.env.BINANCE_API_SECRET || '',
   binanceBase: process.env.BINANCE_FAPI_BASE || 'https://fapi.binance.com',
   wsUrl: process.env.BINANCE_FUTURES_WS || 'wss://fstream.binance.com/ws/!miniTicker@arr',
+  spotWsUrl: process.env.BINANCE_SPOT_WS || 'wss://stream.binance.com:9443/ws/!miniTicker@arr',
 
   capital: Number(process.env.PAPER_START_CAPITAL || 10000),
 
@@ -49,7 +50,14 @@ const cfg = {
   maxPositionMarginPct: Math.min(5, Math.max(0.25, Number(process.env.MAX_POSITION_MARGIN_PCT || 2))),
   leverage: Math.min(10, Math.max(1, Number(process.env.LEVERAGE || 5))),
 
-  scanMs: Math.max(15000, Number(process.env.SCAN_INTERVAL_MS || 20000)),
+  scanMs: Math.max(5000, Number(process.env.SCAN_INTERVAL_MS || 10000)),
+  fastScannerMs: Math.max(500, Number(process.env.FAST_SCANNER_MS || 1000)),
+  fastHistoryMs: Math.max(3000, Number(process.env.FAST_HISTORY_MS || 8000)),
+  btcReferenceSymbol: String(process.env.BTC_REFERENCE_SYMBOL || 'BTCUSDT').toUpperCase(),
+  anomalyMinResidualPct: Math.max(0.02, Number(process.env.ANOMALY_MIN_RESIDUAL_PCT || 0.10)),
+  anomalyStrongResidualPct: Math.max(0.05, Number(process.env.ANOMALY_STRONG_RESIDUAL_PCT || 0.25)),
+  anomalyStaleMs: Math.max(1500, Number(process.env.ANOMALY_STALE_MS || 3000)),
+  anomalyScoreWeight: Math.max(0, Number(process.env.ANOMALY_SCORE_WEIGHT || 0.55)),
   aiTimeoutMs: Math.max(5000, Number(process.env.AI_TIMEOUT_MS || 18000)),
 
   // Full-market discovery happens every cycle from the 24h ticker.
@@ -74,7 +82,8 @@ const cfg = {
   minExpectedNetPct: Math.max(0.02, Number(process.env.MIN_EXPECTED_NET_PCT || 0.08)),
   estimatedFeeRate: Math.max(0.0001, Number(process.env.ESTIMATED_FEE_RATE || 0.0004)),
 
-  maxDailyLossPct: Math.min(10, Math.max(0.5, Number(process.env.MAX_DAILY_LOSS_PCT || 2))),
+  maxDailyLossPct: Math.min(10, Math.max(0.25, Number(process.env.MAX_DAILY_LOSS_PCT || 1))),
+  maxCycleLossUsd: Math.max(8, Number(process.env.MAX_CYCLE_LOSS_USD || 24)),
   maxDrawdownPct: Math.min(15, Math.max(1, Number(process.env.MAX_DRAWDOWN_PCT || 3))),
   minSecondsBetweenOrders: Math.max(2, Number(process.env.MIN_SECONDS_BETWEEN_ORDERS || 2)),
   maxActionsPerCycle: Math.min(12, Math.max(1, Number(process.env.MAX_ACTIONS_PER_CYCLE || 12))),
@@ -108,7 +117,7 @@ function dashboardHtml() {
   const e = state.edgeScanner || {};
   const fmt = x => x == null ? '—' : Number(x).toFixed(2);
   const topRows = (Array.isArray(state.ranking) ? state.ranking.slice(0, 8) : []).map(x => `<tr><td>${htmlEscape(x.symbol)}</td><td>${htmlEscape(x.preferredSide || '—')}</td><td>${fmt(x.edgeScore)}</td><td>${fmt(x.edgeLong)}</td><td>${fmt(x.edgeShort)}</td><td>${htmlEscape(x.behavior?.side || 'MIXTO')}</td><td>${fmt(x.premium?.fundingRatePct)}%</td><td>${fmt(x.openInterestChangePct)}%</td></tr>`).join('');
-  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GALAXI V35 · 12 POSITIONS · 6 LONG / 6 SHORT</title><meta http-equiv="refresh" content="10"><style>body{font-family:system-ui;background:#080b10;color:#eee;margin:0;padding:18px}main{max-width:1100px;margin:auto}.top{display:flex;justify-content:space-between;gap:12px;align-items:end;margin-bottom:16px}.sub{color:#8b949e}.pill{border:1px solid #2f81f7;border-radius:999px;padding:5px 10px;color:#58a6ff;font-size:12px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px}.card{background:#11161d;border:1px solid #252d38;border-radius:12px;padding:14px}.k{color:#8b949e;font-size:12px}.v{font-size:22px;font-weight:750;margin-top:5px}.section{margin-top:18px}.scanner{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px}.edge{background:#0f151c;border:1px solid #26303c;border-radius:12px;padding:14px}.edge b{font-size:20px}.muted{color:#8b949e;font-size:12px}.good{color:#3fb950}.warn{color:#d29922}table{width:100%;border-collapse:collapse;margin-top:10px;background:#11161d;border:1px solid #252d38;border-radius:12px;overflow:hidden}th,td{text-align:left;padding:9px;border-bottom:1px solid #252d38;font-size:13px}a{color:#58a6ff}.tag{display:inline-block;padding:2px 7px;border-radius:999px;background:#1b2330;color:#c9d1d9;font-size:11px;margin-right:4px}</style></head><body><main><div class="top"><div><h1 style="margin:0">GALAXI V35 · 12 POSITIONS · 6 LONG / 6 SHORT</h1><div class="sub">${htmlEscape(state.mode)} · IA ${htmlEscape(state.aiModel)} · ciclo ${state.cycle}</div></div><span class="pill">${state.wsConnected ? 'BINANCE LIVE DATA' : 'BINANCE DESCONECTADO'}</span></div><div class="grid"><div class="card"><div class="k">Equity</div><div class="v">$${Number(state.equity).toFixed(2)}</div></div><div class="card"><div class="k">Net PnL</div><div class="v">$${Number(state.realizedPnl + state.unrealizedPnl).toFixed(2)}</div></div><div class="card"><div class="k">Mercados</div><div class="v">${state.symbols}</div></div><div class="card"><div class="k">Deep / IA</div><div class="v">${state.deepScanned} / ${state.candidates}</div></div><div class="card"><div class="k">IA calls / errores</div><div class="v">${state.aiCalls} / ${state.aiErrors}</div></div><div class="card"><div class="k">Top Trader coverage</div><div class="v">${state.behaviorCoverage}%</div></div><div class="card"><div class="k">Edge tradeable</div><div class="v">${e.tradeableCount || 0}</div></div><div class="card"><div class="k">Posiciones</div><div class="v">${positions.length} · L${state.longOpen}/S${state.shortOpen}</div></div></div><div class="section"><div class="card"><div class="k">P&L AUDIT · TP / HARD LOSS</div><div class="v">+$${Number(state.paperProfitTakeUsd ?? cfg.paperProfitTakeUsd).toFixed(2)} / -$${Number(state.paperHardLossUsd ?? cfg.paperHardLossUsd).toFixed(2)}</div><div class="muted">Realizado $${Number(state.realizedPnl||0).toFixed(2)} · No realizado $${Number(state.unrealizedPnl||0).toFixed(2)} · discrepancia $${Number(state.pnlAudit?.discrepancy||0).toFixed(4)}</div></div></div><div class="section"><h2>EDGE SCANNER</h2><div class="scanner"><div class="edge"><div class="muted">MEJOR LONG</div><b>${htmlEscape(e.bestLong?.symbol || '—')}</b><div>Score <span class="good">${fmt(e.bestLong?.score)}</span></div><div class="muted">Trader ${htmlEscape(e.bestLong?.behavior || '—')} · funding ${fmt(e.bestLong?.funding)}% · basis ${fmt(e.bestLong?.basis)}%</div></div><div class="edge"><div class="muted">MEJOR SHORT</div><b>${htmlEscape(e.bestShort?.symbol || '—')}</b><div>Score <span class="good">${fmt(e.bestShort?.score)}</span></div><div class="muted">Trader ${htmlEscape(e.bestShort?.behavior || '—')} · funding ${fmt(e.bestShort?.funding)}% · basis ${fmt(e.bestShort?.basis)}%</div></div><div class="edge"><div class="muted">MEJOR OPORTUNIDAD</div><b>${htmlEscape(e.bestOverall?.symbol || '—')} ${htmlEscape(e.bestOverall?.side || '')}</b><div>Score <span class="good">${fmt(e.bestOverall?.score)}</span></div><div class="muted">Observados ${e.watchedCount || 0} · promedio ${fmt(e.avgEdge)}</div></div></div></div><div class="section"><h2>EDGE LEADERBOARD</h2><table><thead><tr><th>Símbolo</th><th>Sesgo</th><th>Edge</th><th>Long</th><th>Short</th><th>Top Trader</th><th>Funding</th><th>OI 5m</th></tr></thead><tbody>${topRows || '<tr><td colspan=8>Esperando scanner</td></tr>'}</tbody></table></div><div class="section"><h2>Posiciones</h2><table><thead><tr><th>Símbolo</th><th>Lado</th><th>Entrada</th><th>Mark</th><th>PnL</th><th>Pico</th><th>Edad</th></tr></thead><tbody>${rows || '<tr><td colspan=7>Sin posiciones abiertas</td></tr>'}</tbody></table></div><div class="section muted">Régimen: <span class="tag">${htmlEscape(state.regime)}</span> Comportamiento: <span class="tag">${htmlEscape(state.behaviorBias)}</span> · Confianza ${state.behaviorConfidence}% · <a href="/health">health</a> · <a href="/state">state</a></div></main></body></html>`;
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GALAXI V38 · ANOMALY ENGINE · 12 POSITIONS · 6 LONG / 6 SHORT</title><meta http-equiv="refresh" content="10"><style>body{font-family:system-ui;background:#080b10;color:#eee;margin:0;padding:18px}main{max-width:1100px;margin:auto}.top{display:flex;justify-content:space-between;gap:12px;align-items:end;margin-bottom:16px}.sub{color:#8b949e}.pill{border:1px solid #2f81f7;border-radius:999px;padding:5px 10px;color:#58a6ff;font-size:12px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px}.card{background:#11161d;border:1px solid #252d38;border-radius:12px;padding:14px}.k{color:#8b949e;font-size:12px}.v{font-size:22px;font-weight:750;margin-top:5px}.section{margin-top:18px}.scanner{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px}.edge{background:#0f151c;border:1px solid #26303c;border-radius:12px;padding:14px}.edge b{font-size:20px}.muted{color:#8b949e;font-size:12px}.good{color:#3fb950}.warn{color:#d29922}table{width:100%;border-collapse:collapse;margin-top:10px;background:#11161d;border:1px solid #252d38;border-radius:12px;overflow:hidden}th,td{text-align:left;padding:9px;border-bottom:1px solid #252d38;font-size:13px}a{color:#58a6ff}.tag{display:inline-block;padding:2px 7px;border-radius:999px;background:#1b2330;color:#c9d1d9;font-size:11px;margin-right:4px}</style></head><body><main><div class="top"><div><h1 style="margin:0">GALAXI V38 · ANOMALY ENGINE · 12 POSITIONS · 6 LONG / 6 SHORT</h1><div class="sub">${htmlEscape(state.mode)} · IA ${htmlEscape(state.aiModel)} · ciclo ${state.cycle}</div></div><span class="pill">${state.wsConnected ? 'BINANCE LIVE DATA' : 'BINANCE DESCONECTADO'}</span></div><div class="grid"><div class="card"><div class="k">Equity</div><div class="v">$${Number(state.equity).toFixed(2)}</div></div><div class="card"><div class="k">Net PnL</div><div class="v">$${Number(state.realizedPnl + state.unrealizedPnl).toFixed(2)}</div></div><div class="card"><div class="k">Mercados</div><div class="v">${state.symbols}</div></div><div class="card"><div class="k">Deep / IA</div><div class="v">${state.deepScanned} / ${state.candidates}</div></div><div class="card"><div class="k">IA calls / errores</div><div class="v">${state.aiCalls} / ${state.aiErrors}</div></div><div class="card"><div class="k">Top Trader coverage</div><div class="v">${state.behaviorCoverage}%</div></div><div class="card"><div class="k">Edge tradeable</div><div class="v">${e.tradeableCount || 0}</div></div><div class="card"><div class="k">Posiciones</div><div class="v">${positions.length} · L${state.longOpen}/S${state.shortOpen}</div></div><div class="card"><div class="k">FAST SCANNER</div><div class="v">${state.fastScanner?.scanned || 0}/s</div><div class="muted">señales ${state.fastScanner?.freshSignals || 0} · Spot ${state.fastScanner?.spotConnected ? 'OK' : '—'}</div></div><div class="card"><div class="k">BTC ANOMALY ENGINE</div><div class="v">${state.anomalyScanner?.anomalous || 0}</div><div class="muted">residuales · BTC ${fmt(state.anomalyScanner?.btcMovePct)}%</div></div></div><div class="section"><div class="card"><div class="k">P&L AUDIT · TP / HARD LOSS</div><div class="v">+$${Number(state.paperProfitTakeUsd ?? cfg.paperProfitTakeUsd).toFixed(2)} / -$${Number(state.paperHardLossUsd ?? cfg.paperHardLossUsd).toFixed(2)}</div><div class="muted">Realizado $${Number(state.realizedPnl||0).toFixed(2)} · No realizado $${Number(state.unrealizedPnl||0).toFixed(2)} · discrepancia $${Number(state.pnlAudit?.discrepancy||0).toFixed(4)}</div></div></div><div class="section"><h2>FAST MISPRICING SCANNER</h2><div class="card"><div class="muted">VIGILANCIA CONTINUA</div><b>${state.fastScanner?.scanned || 0} mercados/s</b><div class="muted">Señales frescas ${state.fastScanner?.freshSignals || 0} · Spot ${state.fastScanner?.spotConnected ? 'CONECTADO' : 'DESCONECTADO'}</div><div class="muted">Mejor ${htmlEscape(state.fastScanner?.bestOverall?.symbol || '—')} ${htmlEscape(state.fastScanner?.bestOverall?.side || '')} · score ${fmt(state.fastScanner?.bestOverall?.score)}</div></div></div><div class="section"><h2>BTC-RELATIVE ANOMALY ENGINE</h2><div class="card"><div class="muted">REFERENCIA ${htmlEscape(cfg.btcReferenceSymbol)}</div><b>${state.anomalyScanner?.anomalous || 0} anomalías frescas</b><div class="muted">BTC ${fmt(state.anomalyScanner?.btcMovePct)}% · mejor ${htmlEscape(state.anomalyScanner?.bestOverall?.symbol || "—")} · score ${fmt(state.anomalyScanner?.bestOverall?.anomalyScore)}</div><div class="muted">Residual ${fmt(state.anomalyScanner?.bestOverall?.btcRelativeResidualPct)}% · velocidad relativa ${fmt(state.anomalyScanner?.bestOverall?.btcRelativeVelocityPctPerMin)}%/min</div></div></div><div class="section"><h2>EDGE SCANNER</h2><div class="scanner"><div class="edge"><div class="muted">MEJOR LONG</div><b>${htmlEscape(e.bestLong?.symbol || '—')}</b><div>Score <span class="good">${fmt(e.bestLong?.score)}</span></div><div class="muted">Trader ${htmlEscape(e.bestLong?.behavior || '—')} · funding ${fmt(e.bestLong?.funding)}% · basis ${fmt(e.bestLong?.basis)}%</div></div><div class="edge"><div class="muted">MEJOR SHORT</div><b>${htmlEscape(e.bestShort?.symbol || '—')}</b><div>Score <span class="good">${fmt(e.bestShort?.score)}</span></div><div class="muted">Trader ${htmlEscape(e.bestShort?.behavior || '—')} · funding ${fmt(e.bestShort?.funding)}% · basis ${fmt(e.bestShort?.basis)}%</div></div><div class="edge"><div class="muted">MEJOR OPORTUNIDAD</div><b>${htmlEscape(e.bestOverall?.symbol || '—')} ${htmlEscape(e.bestOverall?.side || '')}</b><div>Score <span class="good">${fmt(e.bestOverall?.score)}</span></div><div class="muted">Observados ${e.watchedCount || 0} · promedio ${fmt(e.avgEdge)}</div></div></div></div><div class="section"><h2>EDGE LEADERBOARD</h2><table><thead><tr><th>Símbolo</th><th>Sesgo</th><th>Edge</th><th>Long</th><th>Short</th><th>Top Trader</th><th>Funding</th><th>OI 5m</th></tr></thead><tbody>${topRows || '<tr><td colspan=8>Esperando scanner</td></tr>'}</tbody></table></div><div class="section"><h2>Posiciones</h2><table><thead><tr><th>Símbolo</th><th>Lado</th><th>Entrada</th><th>Mark</th><th>PnL</th><th>Pico</th><th>Edad</th></tr></thead><tbody>${rows || '<tr><td colspan=7>Sin posiciones abiertas</td></tr>'}</tbody></table></div><div class="section muted">Régimen: <span class="tag">${htmlEscape(state.regime)}</span> Comportamiento: <span class="tag">${htmlEscape(state.behaviorBias)}</span> · Confianza ${state.behaviorConfidence}% · <a href="/health">health</a> · <a href="/state">state</a></div></main></body></html>`;
 }
 
 const webServer = http.createServer((req, res) => {
@@ -157,7 +166,10 @@ const state = {
   deepScanned: 0,
   warmSymbols: 0,
   cycle: 0,
+  cycleRealizedStart: 0,
+  cycleLossUsd: 0,
   wsConnected: 0,
+  spotConnected: 0,
   candidates: 0,
   riskApproved: 0,
 
@@ -170,6 +182,29 @@ const state = {
   behaviorCoverage: 0,
   behaviorBias: 'MIXTO',
   behaviorConfidence: 0,
+
+  fastScanner: {
+    scanned: 0,
+    freshSignals: 0,
+    spotConnected: 0,
+    bestLong: null,
+    bestShort: null,
+    bestOverall: null,
+    btcMovePct: 0,
+    btcVelocityPctPerMin: 0,
+    lastScanMs: 0
+  },
+
+  anomalyScanner: {
+    reference: cfg.btcReferenceSymbol,
+    scanned: 0,
+    anomalous: 0,
+    bestLong: null,
+    bestShort: null,
+    bestOverall: null,
+    btcMovePct: 0,
+    lastScanMs: 0
+  },
 
   edgeScanner: {
     bestLong: null,
@@ -214,6 +249,12 @@ const behaviorCache = new Map();
 const openInterestCache = new Map();
 const premiumCache = new Map();
 const scanMicro = new Map();
+const spotTicks = new Map();
+const fastHistory = new Map();
+let spotWs = null;
+let spotReconnectTimer = null;
+let fastLoopBusy = false;
+let cycleRealizedStart = 0;
 
 let learningTrades = [];
 let ws = null;
@@ -468,7 +509,14 @@ function selectDeepUniverse() {
     .sort((a, b) => b.score - a.score)
     .map(x => x.symbol);
 
-  const movers = ranked.slice(0, Math.max(12, cfg.deepScanSymbols - cfg.rotationSymbols));
+  const fastRank = all
+    .map(symbol => ({ symbol, score: Number(ticks.get(symbol)?.fastMispricingScore || 0) }))
+    .filter(x => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .map(x => x.symbol);
+
+  const fastLeaders = fastRank.slice(0, Math.min(12, Math.floor(cfg.deepScanSymbols / 4)));
+  const movers = [...fastLeaders, ...ranked.slice(0, Math.max(12, cfg.deepScanSymbols - cfg.rotationSymbols))].filter((s, i, arr) => arr.indexOf(s) === i);
 
   // Rotation prevents the same 20-30 familiar symbols from monopolizing the AI.
   const remaining = ranked.filter(s => !movers.includes(s));
@@ -654,7 +702,17 @@ function analyzeKlines(symbol, k1, k5) {
 
     quoteVolume24h: round(Number(ticks.get(symbol)?.volume || 0), 0),
     change24h: round(Number(ticks.get(symbol)?.changePct || 0), 3),
-    category: marketInfo.get(symbol)?.category || 'NORMAL'
+    category: marketInfo.get(symbol)?.category || 'NORMAL',
+    fastMispricingScore: Number(freshFastData(symbol).fastMispricingScore || 0),
+    fastPreferredSide: freshFastData(symbol).fastPreferredSide || '—',
+    crossBasisPct: Number(freshFastData(symbol).crossBasisPct || 0),
+    fastVelocityPctPerMin: Number(freshFastData(symbol).fastVelocityPctPerMin || 0),
+    fastAcceleration: Number(freshFastData(symbol).fastAcceleration || 0),
+    btcMovePct: Number(freshFastData(symbol).btcMovePct || 0),
+    btcRelativeResidualPct: Number(freshFastData(symbol).btcRelativeResidualPct || 0),
+    btcRelativeVelocityPctPerMin: Number(freshFastData(symbol).btcRelativeVelocityPctPerMin || 0),
+    anomalyScore: Number(freshFastData(symbol).anomalyScore || 0),
+    anomalyFresh: Boolean(freshFastData(symbol).anomalyFresh)
   };
 }
 
@@ -771,6 +829,160 @@ async function fetchPremiumIndex(symbol) {
   }
 }
 
+function fastMetrics(symbol, reference = null) {
+  const f = ticks.get(symbol);
+  const sp = spotTicks.get(symbol);
+  if (!f?.price) return null;
+  const h = fastHistory.get(symbol) || [];
+  const t = now();
+  const cutoff = t - cfg.fastHistoryMs;
+  const clean = h.filter(x => x.ts >= cutoff);
+  const prev = clean[0];
+  const prev2 = clean.length > 1 ? clean[Math.max(0, clean.length - 2)] : null;
+  const price = Number(f.price);
+  const spot = Number(sp?.price || 0);
+  const crossBasisPct = spot > 0 ? (price / spot - 1) * 100 : 0;
+  const movePct = prev?.price ? (price / prev.price - 1) * 100 : 0;
+  const dtMin = prev ? Math.max(1 / 60, (t - prev.ts) / 60000) : 1 / 60;
+  const velocityPctPerMin = movePct / dtMin;
+  const priorMove = prev2?.price && prev?.price ? (prev.price / prev2.price - 1) * 100 : 0;
+  const priorDtMin = prev2 ? Math.max(1 / 60, (prev.ts - prev2.ts) / 60000) : dtMin;
+  const priorVelocity = priorMove / priorDtMin;
+  const acceleration = velocityPctPerMin - priorVelocity;
+  const refMovePct = Number(reference?.movePct || 0);
+  const refVelocityPctPerMin = Number(reference?.velocityPctPerMin || 0);
+  const btcRelativeResidualPct = movePct - refMovePct;
+  const btcRelativeVelocityPctPerMin = velocityPctPerMin - refVelocityPctPerMin;
+  const relativeSide = btcRelativeVelocityPctPerMin > 0 ? 'LONG' : btcRelativeVelocityPctPerMin < 0 ? 'SHORT' : 'NEUTRAL';
+  const residualAbs = Math.abs(btcRelativeResidualPct);
+  const velocityAbs = Math.abs(btcRelativeVelocityPctPerMin);
+  const strongResidual = residualAbs >= cfg.anomalyStrongResidualPct ? 1.25 : 1;
+  const anomalyScore = round(clamp(
+    (residualAbs * 30 + velocityAbs * 2.5 + Math.abs(acceleration) * 0.7) * strongResidual,
+    0,
+    50
+  ), 2);
+  const anomalyFresh = residualAbs >= cfg.anomalyMinResidualPct &&
+    velocityAbs >= cfg.anomalyMinResidualPct / Math.max(1, cfg.fastHistoryMs / 60000);
+  fastHistory.set(symbol, [...clean.slice(-8), { price, ts: t }]);
+  return {
+    price,
+    spotPrice: spot,
+    crossBasisPct: round(crossBasisPct, 4),
+    movePct: round(movePct, 4),
+    velocityPctPerMin: round(velocityPctPerMin, 4),
+    acceleration: round(acceleration, 4),
+    btcReference: cfg.btcReferenceSymbol,
+    btcMovePct: round(refMovePct, 4),
+    btcVelocityPctPerMin: round(refVelocityPctPerMin, 4),
+    btcRelativeResidualPct: round(btcRelativeResidualPct, 4),
+    btcRelativeVelocityPctPerMin: round(btcRelativeVelocityPctPerMin, 4),
+    relativeSide,
+    anomalyScore,
+    anomalyFresh,
+    anomalyTs: t
+  };
+}
+
+function mispricingScore(metrics, premium, side) {
+  if (!metrics) return 0;
+  const dir = side === 'LONG' ? 1 : -1;
+  const basis = Number(metrics.crossBasisPct || 0);
+  const markBasis = Number(premium?.basisPct || 0);
+  const funding = Number(premium?.fundingRatePct || 0);
+  const velocity = Number(metrics.velocityPctPerMin || 0) * dir;
+  const acceleration = Number(metrics.acceleration || 0) * dir;
+
+  // Dislocation is a detector, not a claim of risk-free arbitrage. It is
+  // stronger when the observed impulse agrees with the side being evaluated.
+  const crossDislocation = clamp((-basis * dir) * 22, 0, 18);
+  const markDislocation = clamp((-markBasis * dir) * 18, 0, 12);
+  const fundingDislocation = clamp((-funding * dir) * 10, 0, 8);
+  const impulse = clamp(velocity * 5 + acceleration * 2, 0, 12);
+  const reversalPenalty = velocity < 0 ? 8 : 0;
+  return round(clamp(crossDislocation + markDislocation + fundingDislocation + impulse - reversalPenalty, 0, 50), 2);
+}
+
+function runFastScanner() {
+  if (fastLoopBusy || stopped) return;
+  fastLoopBusy = true;
+  try {
+    const rows = [];
+    // Establish the BTC reference first so every symbol is measured against
+    // the same short-window move and velocity.
+    const btc = fastMetrics(cfg.btcReferenceSymbol, null);
+    const reference = btc || { movePct: 0, velocityPctPerMin: 0 };
+
+    for (const symbol of marketInfo.keys()) {
+      const m = symbol === cfg.btcReferenceSymbol ? reference : fastMetrics(symbol, reference);
+      if (!m) continue;
+      const p = premiumCache.get(symbol);
+      const longMis = mispricingScore(m, p, 'LONG');
+      const shortMis = mispricingScore(m, p, 'SHORT');
+      const bestSide = longMis >= shortMis ? 'LONG' : 'SHORT';
+      const best = Math.max(longMis, shortMis);
+      rows.push({ symbol, ...m, mispricingLong: longMis, mispricingShort: shortMis, mispricingScore: best });
+    }
+
+    rows.sort((a, b) => (b.anomalyScore + b.mispricingScore) - (a.anomalyScore + a.mispricingScore));
+    const fresh = rows.filter(x => x.anomalyFresh || (x.mispricingScore >= 12 && Math.abs(x.velocityPctPerMin) >= 0.08)).slice(0, 16);
+    const bestLong = [...rows].sort((a,b) => (b.mispricingLong + b.anomalyScore * 0.35) - (a.mispricingLong + a.anomalyScore * 0.35))[0] || null;
+    const bestShort = [...rows].sort((a,b) => (b.mispricingShort + b.anomalyScore * 0.35) - (a.mispricingShort + a.anomalyScore * 0.35))[0] || null;
+    const bestOverall = rows[0] || null;
+
+    state.fastScanner = {
+      scanned: rows.length,
+      freshSignals: fresh.length,
+      spotConnected: state.spotConnected ? 1 : 0,
+      btcMovePct: round(reference.movePct || 0, 4),
+      btcVelocityPctPerMin: round(reference.velocityPctPerMin || 0, 4),
+      bestLong: bestLong ? {symbol: bestLong.symbol, score: bestLong.mispricingLong, anomaly: bestLong.anomalyScore, residual: bestLong.btcRelativeResidualPct, basis: bestLong.crossBasisPct, velocity: bestLong.velocityPctPerMin} : null,
+      bestShort: bestShort ? {symbol: bestShort.symbol, score: bestShort.mispricingShort, anomaly: bestShort.anomalyScore, residual: bestShort.btcRelativeResidualPct, basis: bestShort.crossBasisPct, velocity: bestShort.velocityPctPerMin} : null,
+      bestOverall: bestOverall ? {symbol: bestOverall.symbol, side: bestOverall.relativeSide, score: bestOverall.mispricingScore, anomaly: bestOverall.anomalyScore, residual: bestOverall.btcRelativeResidualPct, basis: bestOverall.crossBasisPct, velocity: bestOverall.velocityPctPerMin} : null,
+      lastScanMs: now()
+    };
+
+    state.anomalyScanner = {
+      reference: cfg.btcReferenceSymbol,
+      scanned: rows.length,
+      anomalous: rows.filter(x => x.anomalyFresh).length,
+      btcMovePct: round(reference.movePct || 0, 4),
+      bestLong: [...rows].filter(x => x.btcRelativeVelocityPctPerMin > 0).sort((a,b) => b.anomalyScore-a.anomalyScore)[0] || null,
+      bestShort: [...rows].filter(x => x.btcRelativeVelocityPctPerMin < 0).sort((a,b) => b.anomalyScore-a.anomalyScore)[0] || null,
+      bestOverall: bestOverall || null,
+      lastScanMs: now()
+    };
+
+    // Feed fresh signals into the normal cycle, with a timestamp so stale
+    // anomalies cannot keep influencing decisions after the dislocation fades.
+    for (const x of fresh.slice(0, 24)) {
+      const old = ticks.get(x.symbol) || {};
+      ticks.set(x.symbol, {
+        ...old,
+        fastMispricingScore: x.mispricingScore,
+        fastPreferredSide: x.relativeSide,
+        fastVelocityPctPerMin: x.velocityPctPerMin,
+        fastAcceleration: x.acceleration,
+        crossBasisPct: x.crossBasisPct,
+        btcMovePct: x.btcMovePct,
+        btcRelativeResidualPct: x.btcRelativeResidualPct,
+        btcRelativeVelocityPctPerMin: x.btcRelativeVelocityPctPerMin,
+        anomalyScore: x.anomalyScore,
+        anomalyFresh: x.anomalyFresh,
+        anomalyTs: x.anomalyTs
+      });
+    }
+  } finally {
+    fastLoopBusy = false;
+  }
+}
+function freshFastData(symbol) {
+  const f = ticks.get(symbol) || {};
+  const ts = Number(f.anomalyTs || 0);
+  if (!ts || now() - ts > cfg.anomalyStaleMs) return {};
+  return f;
+}
+
 function edgeForSide(row, side) {
   const dir = side === 'LONG' ? 1 : -1;
   const m1 = Number(row.momentum1m || 0) * dir;
@@ -784,6 +996,13 @@ function edgeForSide(row, side) {
   const oi = Number(row.openInterestChangePct || 0) * dir;
   const funding = Number(row.premium?.fundingRatePct || 0) * dir;
   const basis = Number(row.premium?.basisPct || 0) * dir;
+  const fast = freshFastData(row.symbol);
+  const fastMispricing = Number(fast.fastMispricingScore || 0);
+  const fastSide = fast.fastPreferredSide || '';
+  const fastAgreement = fastSide === side ? 1 : 0;
+  const anomalyScore = Number(fast.anomalyScore || 0);
+  const anomalyVelocity = Number(fast.btcRelativeVelocityPctPerMin || 0) * dir;
+  const anomalyAgreement = anomalyVelocity > 0 ? 1 : 0;
   const volume = Math.max(0, Number(row.volumeRatio || 1) - 1);
 
   const techScore = clamp((m5 * 3 + m15 * 2 + m30) * 1.8, 0, 30);
@@ -801,7 +1020,10 @@ function edgeForSide(row, side) {
     : (row.earlyStageShort ? cfg.earlyBreakoutBonus : 0);
   const velocity = Number(row.microVelocityPctPerMin || 0) * dir;
   const acceleration = Number(row.microAcceleration || 0) * dir;
-  const impulseScore = clamp(velocity * 18 + acceleration * 8, 0, 8);
+  const impulseScore = clamp(velocity * 18 + acceleration * 8, 0, 8)
+    + clamp(fastMispricing * 0.45, 0, 18)
+    + clamp(anomalyScore * cfg.anomalyScoreWeight, 0, 20) * anomalyAgreement
+    + (fastAgreement ? 4 : 0);
   const move15 = Math.max(0, m15);
   const extension = move15 >= cfg.lateExtensionPct ? clamp((move15 - cfg.lateExtensionPct) * 5, 0, 12) : 0;
 
@@ -816,7 +1038,7 @@ function enrichEdge(row) {
   const edgeScore = Math.max(long, short);
   const behaviorSide = row.behavior?.side || 'MIXTO';
   const agreement = behaviorSide === preferredSide ? 'CONFIRMADA' : behaviorSide === 'MIXTO' ? 'NEUTRA' : 'CONTRARIA';
-  return { ...row, edgeLong: long, edgeShort: short, edgeScore, preferredSide, behaviorAgreement: agreement };
+  return { ...row, edgeLong: long, edgeShort: short, edgeScore, preferredSide, behaviorAgreement: agreement, anomalyScore: Number(row.anomalyScore || 0) };
 }
 
 async function mapLimit(items, limit, worker) {
@@ -1091,6 +1313,11 @@ function riskAllowsOpen(symbol, margin, side) {
     return { ok: false, reason: 'DAILY_LOSS' };
   }
 
+  const cycleLossSoFar = Number(state.cycleRealizedStart || state.realizedPnl) - Number(state.realizedPnl || 0);
+  if (cycleLossSoFar >= cfg.maxCycleLossUsd) {
+    return { ok: false, reason: 'CYCLE_LOSS_GUARD' };
+  }
+
   if (equityDrawdownPct >= cfg.maxDrawdownPct) {
     return { ok: false, reason: 'MAX_DRAWDOWN' };
   }
@@ -1198,6 +1425,17 @@ async function askAI(market, account) {
       behaviorAgreement: x.behaviorAgreement,
       fundingRatePct: x.premium?.fundingRatePct || 0,
       basisPct: x.premium?.basisPct || 0,
+      crossVenueBasisPct: x.crossBasisPct || 0,
+      fastMispricingScore: x.fastMispricingScore || 0,
+      fastPreferredSide: x.fastPreferredSide || '—',
+      fastVelocityPctPerMin: x.fastVelocityPctPerMin || 0,
+      fastAcceleration: x.fastAcceleration || 0,
+      btcReference: cfg.btcReferenceSymbol,
+      btcMovePct: x.btcMovePct || 0,
+      btcRelativeResidualPct: x.btcRelativeResidualPct || 0,
+      btcRelativeVelocityPctPerMin: x.btcRelativeVelocityPctPerMin || 0,
+      anomalyScore: x.anomalyScore || 0,
+      anomalyFresh: Boolean(x.anomalyFresh),
 
       topTraderAccountRatio: x.behavior?.accountRatio || 1,
       topTraderPositionRatio: x.behavior?.positionRatio || 1,
@@ -1240,17 +1478,20 @@ async function askAI(market, account) {
       aiAnalyzed: compactMarket.length,
       behaviorCoveragePct: state.behaviorCoverage,
       behaviorBiasDiagnosticOnly: state.behaviorBias,
-      behaviorConfidenceDiagnosticOnly: state.behaviorConfidence
+      behaviorConfidenceDiagnosticOnly: state.behaviorConfidence,
+      btcReference: cfg.btcReferenceSymbol,
+      anomalyScanner: state.anomalyScanner
     },
 
     learning: learningSummary(),
     edgeScanner: state.edgeScanner,
+    fastScanner: state.fastScanner,
     market: compactMarket,
     positions
   };
 
   const instructions = `
-Eres GALAXI V32, un motor autónomo de decisión para Binance USDⓈ-M Futures.
+Eres GALAXI V38, un motor autónomo de decisión para Binance USDⓈ-M Futures.
 
 OBJETIVO:
 Encontrar operaciones con expectativa neta positiva después de comisiones, gestionar
@@ -1264,12 +1505,17 @@ CAPAS QUE DEBES COMBINAR:
 5) Open Interest cuando esté disponible.
 6) Memoria de resultados propios de GALAXI.
 7) Estado actual de la cartera y tesis de cada posición.
-8) EDGE SCANNER: compara LONG vs SHORT usando score técnico, comportamiento, OI,
-funding y basis. Usa el score como filtro de calidad, no como garantía.
+8) EDGE SCANNER: compara LONG vs SHORT usando score técnico, comportamiento, OI, funding y basis. Usa el score como filtro de calidad, no como garantía.
+9) FAST MISPRICING: usa la discrepancia entre futuros y spot, basis mark/index, funding y micro-movimiento para detectar el inicio de una corrección/impulso. La discrepancia es una señal relativa, NO arbitraje garantizado.
+10) BTC-RELATIVE ANOMALY ENGINE: compara el movimiento/velocidad de cada símbolo con BTCUSDT en la misma ventana corta. El residual es 'movimiento de la moneda - movimiento de BTC'. Un residual grande significa desviación relativa, NO garantía de reversión. Usa además la dirección de la velocidad relativa para decidir si la anomalía está acelerándose en LONG o SHORT.
 
 MODELO TIPO TERMINAL:
-- 'Mispricing' en cripto se aproxima con basis mark/index + funding; no significa
-  arbitraje garantizado.
+- 'Mispricing' en cripto se aproxima con futuros-vs-spot + mark-vs-index + funding + micro-impulso; no significa arbitraje garantizado.
+- El FAST SCANNER vigila los ~528 símbolos cada ~1s usando WebSocket y sólo eleva candidatos al ciclo profundo cuando detecta movimiento/discrepancia.
+- El ANOMALY ENGINE usa BTCUSDT como referencia común y busca residuales relativos en decenas/cientos de mercados; no priorices una moneda por fama, precio nominal o tamaño.
+- Un residual positivo/negativo por sí solo NO decide LONG/SHORT. Confirma con velocidad relativa, volumen, OI, funding, basis, estructura y expectativa neta.
+- Si la anomalía se vuelve vieja, ignórala: los campos anomalyFresh/anomalyTs tienen prioridad sobre señales antiguas.
+- No esperes al cierre de una vela si la discrepancia y el impulso aparecen antes.
 - 'Wallet tracker' se sustituye por comportamiento agregado Top Trader de Binance;
   no hay que inventar identidades ni copiar wallets individuales.
 - 'Copytrade' significa seguir el sesgo agregado sólo cuando coincide con el resto
@@ -1299,6 +1545,7 @@ ENTRADA:
 - Prefiere oportunidades con edge, expectativa neta, liquidez, comportamiento, OI y estructura que coincidan.
 - expected_net_pct debe superar ${cfg.minExpectedNetPct}% después de comisiones.
 - PRIORIDAD DE TIMING: busca el inicio del movimiento. Usa freshBreakout, microVelocity, microAcceleration, volumen y momentum 1m/5m para entrar en los primeros momentos cuando la señal recién se confirma.
+- ANOMALÍA RELATIVA: prioriza una oportunidad cuando el residual frente a BTC es material y la velocidad relativa confirma el mismo lado; si el residual es grande pero la velocidad se contradice, exige evidencia adicional y no fuerces la entrada.
 - Evita entradas tardías cuando el movimiento ya está demasiado extendido; un score alto por sí solo NO justifica perseguir una vela ya corrida.
 - No repitas una moneda sólo porque funcionó antes.
 - Las monedas nuevas y memecoins compiten por mérito; no reciben una operación automática.
@@ -1355,7 +1602,7 @@ Formato:
         text: {
           format: {
             type: 'json_schema',
-            name: 'galaxi_v33_trade_decision',
+            name: 'galaxi_v38_trade_decision',
             strict: true,
             schema: {
               type: 'object',
@@ -1868,6 +2115,7 @@ async function executeDecision(decision, market) {
     }
 
     for (const a of opens) {
+      if (stopped) break;
       try {
         const row = findMarketRow(market, a.symbol);
         if (row) paperOpen(a, row);
@@ -1901,6 +2149,32 @@ async function executeDecision(decision, market) {
       }
     }
   }
+}
+
+function connectSpot() {
+  try {
+    spotWs = new WebSocket(cfg.spotWsUrl);
+    spotWs.on('open', () => { state.spotConnected = 1; });
+    spotWs.on('close', () => {
+      state.spotConnected = 0;
+      if (!stopped && !spotReconnectTimer) {
+        spotReconnectTimer = setTimeout(() => { spotReconnectTimer = null; connectSpot(); }, 3000);
+      }
+    });
+    spotWs.on('error', e => { state.lastError = `Spot WS: ${e.message || 'error'}`; });
+    spotWs.on('message', raw => {
+      try {
+        const arr = JSON.parse(raw.toString());
+        if (!Array.isArray(arr)) return;
+        for (const t of arr) {
+          const symbol = t.s;
+          if (!symbol || !symbol.endsWith('USDT')) continue;
+          const price = Number(t.c);
+          if (price > 0) spotTicks.set(symbol, { price, ts: now(), volume: Number(t.q || 0) });
+        }
+      } catch {}
+    });
+  } catch (e) { state.lastError = `Spot WS init: ${e.message}`; }
 }
 
 function connect() {
@@ -1964,6 +2238,8 @@ async function runCycle() {
   try {
     emergencyStopCheck();
     state.cycle++;
+    cycleRealizedStart = state.realizedPnl;
+    state.cycleRealizedStart = cycleRealizedStart;
 
     if (!state.wsConnected) {
       state.lastSignal = 'Esperando WebSocket de Binance…';
@@ -2004,6 +2280,13 @@ async function runCycle() {
     const decision = await askAI(market, account);
     await executeDecision(decision, market);
 
+    const cycleLoss = cycleRealizedStart - state.realizedPnl;
+    state.cycleLossUsd = round(Math.max(0, cycleLoss), 2);
+    if (cycleLoss >= cfg.maxCycleLossUsd) {
+      stopped = true;
+      state.lastSignal = `STOP: pérdida de ciclo $${cycleLoss.toFixed(2)} >= $${cfg.maxCycleLossUsd.toFixed(2)}`;
+    }
+
     state.lastSignal = decision.summary || 'IA evaluó el mercado';
 
     if (state.cycle % 5 === 0) {
@@ -2040,12 +2323,13 @@ function loadControl() {
 
 async function boot() {
   console.log(
-    `GALAXI V36 AUDITED | mode=${cfg.mode}` +
+    `GALAXI V38 ANOMALY ENGINE | mode=${cfg.mode}` +
     ` | model=${cfg.openaiModel}` +
     ` | scan=${cfg.scanMs}ms` +
     ` | deep=${cfg.deepScanSymbols}` +
     ` | ai=${cfg.aiTopSymbols}` +
-    ` | slots=12 independiente`
+    ` | slots=12 independiente` +
+    ` | fast=${cfg.fastScannerMs}ms`
   );
 
   loadControl();
@@ -2062,6 +2346,8 @@ async function boot() {
   await syncServerTime();
   await loadExchangeInfo();
   connect();
+  connectSpot();
+  setInterval(runFastScanner, cfg.fastScannerMs);
 
   await sleep(5000);
   writeState();
@@ -2080,5 +2366,6 @@ boot().catch(e => {
 process.on('SIGTERM', () => {
   stopped = true;
   try { ws?.close(); } catch {}
+  try { spotWs?.close(); } catch {}
   process.exit(0);
 });

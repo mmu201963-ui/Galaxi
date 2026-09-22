@@ -1,6 +1,6 @@
 {
-  "name": "galaxi-v33-edge-terminal",
-  "version": "34.0.0",
+  "name": "galaxi-v38-anomaly-engine",
+  "version": "38.0.0",
   "private": true,
   "type": "module",
   "scripts": {
