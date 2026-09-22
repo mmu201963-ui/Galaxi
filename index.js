@@ -637,7 +637,7 @@ Formato:
                       confidence: { type: 'number' },
                       expected_net_pct: { type: 'number' }
                     },
-                    required: ['action', 'symbol', 'margin_pct', 'reason', 'confidence']
+                    required: ['action', 'symbol', 'margin_pct', 'reason', 'confidence', 'expected_net_pct']
                   }
                 },
                 summary: { type: 'string' }
