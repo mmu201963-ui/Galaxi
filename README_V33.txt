@@ -1,4 +1,4 @@
-GALAXI V33 · EDGE TERMINAL / BEHAVIORAL ENGINE
+GALAXI V34 · EDGE TERMINAL / BEHAVIORAL ENGINE
 
 Esta versión aplica al motor GALAXI el concepto del terminal mostrado por el usuario,
 adaptándolo a Binance Futures sin inventar datos de wallets individuales.
@@ -14,7 +14,7 @@ CAPAS NUEVAS
   copia wallets individuales ni inventa identidades.
 - EDGE LEADERBOARD: muestra las mejores oportunidades y separa Edge LONG/SHORT.
 - LEARNING: mantiene la memoria de operaciones cerradas y patrones propios.
-- 50/50 estructural: máximo 6 LONG + 6 SHORT, sin forzar una entrada si no hay edge.
+- sin objetivo 50/50 estructural: máximo 12 posiciones totales sin cuota LONG/SHORT, sin forzar una entrada si no hay edge.
 
 SCANNER
 1. Descubre todo el universo USD-M USDT perpetual.

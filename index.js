@@ -4,7 +4,7 @@ import http from 'node:http';
 import WebSocket from 'ws';
 
 /*
- GALAXI V33 · EDGE BEHAVIORAL ENGINE
+ GALAXI V34 · INDEPENDENT 12 EDGE ENGINE
 
  Objective:
  - Scan the complete Binance USDⓈ-M perpetual USDT universe.
@@ -13,7 +13,7 @@ import WebSocket from 'ws';
  - Combine technical structure + momentum + volume + volatility + OI +
    Binance Top-Trader aggregated behavior.
  - Compare current conditions with GALAXI's own closed-trade pattern memory.
- - Prefer a balanced portfolio: maximum 6 LONG + 6 SHORT, 12 total.
+ - Prefer a up to 12 total positions with no LONG/SHORT quota; direction is selected independently per symbol.
  - Manage exits deterministically and through the AI.
  - PAPER is the default. LIVE requires TRADING_MODE=LIVE and LIVE_ARMED=true.
 
@@ -42,8 +42,8 @@ const cfg = {
   capital: Number(process.env.PAPER_START_CAPITAL || 10000),
 
   maxPositions: Math.min(12, Math.max(1, Number(process.env.MAX_POSITIONS || 12))),
-  maxLongPositions: Math.min(6, Math.max(0, Number(process.env.MAX_LONG_POSITIONS || 6))),
-  maxShortPositions: Math.min(6, Math.max(0, Number(process.env.MAX_SHORT_POSITIONS || 6))),
+  maxLongPositions: Math.min(12, Math.max(0, Number(process.env.MAX_LONG_POSITIONS || 12))),
+  maxShortPositions: Math.min(12, Math.max(0, Number(process.env.MAX_SHORT_POSITIONS || 12))),
 
   maxTotalMarginPct: Math.min(50, Math.max(1, Number(process.env.MAX_TOTAL_MARGIN_PCT || 30))),
   maxPositionMarginPct: Math.min(5, Math.max(0.25, Number(process.env.MAX_POSITION_MARGIN_PCT || 2))),
@@ -72,7 +72,7 @@ const cfg = {
   maxDailyLossPct: Math.min(20, Math.max(0.5, Number(process.env.MAX_DAILY_LOSS_PCT || 5))),
   maxDrawdownPct: Math.min(30, Math.max(1, Number(process.env.MAX_DRAWDOWN_PCT || 10))),
   minSecondsBetweenOrders: Math.max(2, Number(process.env.MIN_SECONDS_BETWEEN_ORDERS || 5)),
-  maxActionsPerCycle: Math.min(6, Math.max(1, Number(process.env.MAX_ACTIONS_PER_CYCLE || 4))),
+  maxActionsPerCycle: Math.min(12, Math.max(1, Number(process.env.MAX_ACTIONS_PER_CYCLE || 12))),
 
   paperTpPct: Number(process.env.PAPER_TP_PCT || 0.90),
   paperSlPct: Number(process.env.PAPER_SL_PCT || 0.65),
@@ -98,7 +98,7 @@ function dashboardHtml() {
   const e = state.edgeScanner || {};
   const fmt = x => x == null ? '—' : Number(x).toFixed(2);
   const topRows = (Array.isArray(state.ranking) ? state.ranking.slice(0, 8) : []).map(x => `<tr><td>${htmlEscape(x.symbol)}</td><td>${htmlEscape(x.preferredSide || '—')}</td><td>${fmt(x.edgeScore)}</td><td>${fmt(x.edgeLong)}</td><td>${fmt(x.edgeShort)}</td><td>${htmlEscape(x.behavior?.side || 'MIXTO')}</td><td>${fmt(x.premium?.fundingRatePct)}%</td><td>${fmt(x.openInterestChangePct)}%</td></tr>`).join('');
-  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GALAXI V33 · EDGE TERMINAL</title><meta http-equiv="refresh" content="10"><style>body{font-family:system-ui;background:#080b10;color:#eee;margin:0;padding:18px}main{max-width:1100px;margin:auto}.top{display:flex;justify-content:space-between;gap:12px;align-items:end;margin-bottom:16px}.sub{color:#8b949e}.pill{border:1px solid #2f81f7;border-radius:999px;padding:5px 10px;color:#58a6ff;font-size:12px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px}.card{background:#11161d;border:1px solid #252d38;border-radius:12px;padding:14px}.k{color:#8b949e;font-size:12px}.v{font-size:22px;font-weight:750;margin-top:5px}.section{margin-top:18px}.scanner{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px}.edge{background:#0f151c;border:1px solid #26303c;border-radius:12px;padding:14px}.edge b{font-size:20px}.muted{color:#8b949e;font-size:12px}.good{color:#3fb950}.warn{color:#d29922}table{width:100%;border-collapse:collapse;margin-top:10px;background:#11161d;border:1px solid #252d38;border-radius:12px;overflow:hidden}th,td{text-align:left;padding:9px;border-bottom:1px solid #252d38;font-size:13px}a{color:#58a6ff}.tag{display:inline-block;padding:2px 7px;border-radius:999px;background:#1b2330;color:#c9d1d9;font-size:11px;margin-right:4px}</style></head><body><main><div class="top"><div><h1 style="margin:0">GALAXI V33 · EDGE TERMINAL</h1><div class="sub">${htmlEscape(state.mode)} · IA ${htmlEscape(state.aiModel)} · ciclo ${state.cycle}</div></div><span class="pill">${state.wsConnected ? 'BINANCE LIVE DATA' : 'BINANCE DESCONECTADO'}</span></div><div class="grid"><div class="card"><div class="k">Equity</div><div class="v">$${Number(state.equity).toFixed(2)}</div></div><div class="card"><div class="k">Net PnL</div><div class="v">$${Number(state.realizedPnl + state.unrealizedPnl).toFixed(2)}</div></div><div class="card"><div class="k">Mercados</div><div class="v">${state.symbols}</div></div><div class="card"><div class="k">Deep / IA</div><div class="v">${state.deepScanned} / ${state.candidates}</div></div><div class="card"><div class="k">IA calls / errores</div><div class="v">${state.aiCalls} / ${state.aiErrors}</div></div><div class="card"><div class="k">Top Trader coverage</div><div class="v">${state.behaviorCoverage}%</div></div><div class="card"><div class="k">Edge tradeable</div><div class="v">${e.tradeableCount || 0}</div></div><div class="card"><div class="k">Posiciones</div><div class="v">${positions.length} · L${state.longOpen}/S${state.shortOpen}</div></div></div><div class="section"><h2>EDGE SCANNER</h2><div class="scanner"><div class="edge"><div class="muted">MEJOR LONG</div><b>${htmlEscape(e.bestLong?.symbol || '—')}</b><div>Score <span class="good">${fmt(e.bestLong?.score)}</span></div><div class="muted">Trader ${htmlEscape(e.bestLong?.behavior || '—')} · funding ${fmt(e.bestLong?.funding)}% · basis ${fmt(e.bestLong?.basis)}%</div></div><div class="edge"><div class="muted">MEJOR SHORT</div><b>${htmlEscape(e.bestShort?.symbol || '—')}</b><div>Score <span class="good">${fmt(e.bestShort?.score)}</span></div><div class="muted">Trader ${htmlEscape(e.bestShort?.behavior || '—')} · funding ${fmt(e.bestShort?.funding)}% · basis ${fmt(e.bestShort?.basis)}%</div></div><div class="edge"><div class="muted">MEJOR OPORTUNIDAD</div><b>${htmlEscape(e.bestOverall?.symbol || '—')} ${htmlEscape(e.bestOverall?.side || '')}</b><div>Score <span class="good">${fmt(e.bestOverall?.score)}</span></div><div class="muted">Observados ${e.watchedCount || 0} · promedio ${fmt(e.avgEdge)}</div></div></div></div><div class="section"><h2>EDGE LEADERBOARD</h2><table><thead><tr><th>Símbolo</th><th>Sesgo</th><th>Edge</th><th>Long</th><th>Short</th><th>Top Trader</th><th>Funding</th><th>OI 5m</th></tr></thead><tbody>${topRows || '<tr><td colspan=8>Esperando scanner</td></tr>'}</tbody></table></div><div class="section"><h2>Posiciones</h2><table><thead><tr><th>Símbolo</th><th>Lado</th><th>Entrada</th><th>Mark</th><th>PnL</th></tr></thead><tbody>${rows || '<tr><td colspan=5>Sin posiciones abiertas</td></tr>'}</tbody></table></div><div class="section muted">Régimen: <span class="tag">${htmlEscape(state.regime)}</span> Comportamiento: <span class="tag">${htmlEscape(state.behaviorBias)}</span> · Confianza ${state.behaviorConfidence}% · <a href="/health">health</a> · <a href="/state">state</a></div></main></body></html>`;
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GALAXI V34 · INDEPENDENT 12 EDGE TERMINAL</title><meta http-equiv="refresh" content="10"><style>body{font-family:system-ui;background:#080b10;color:#eee;margin:0;padding:18px}main{max-width:1100px;margin:auto}.top{display:flex;justify-content:space-between;gap:12px;align-items:end;margin-bottom:16px}.sub{color:#8b949e}.pill{border:1px solid #2f81f7;border-radius:999px;padding:5px 10px;color:#58a6ff;font-size:12px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px}.card{background:#11161d;border:1px solid #252d38;border-radius:12px;padding:14px}.k{color:#8b949e;font-size:12px}.v{font-size:22px;font-weight:750;margin-top:5px}.section{margin-top:18px}.scanner{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px}.edge{background:#0f151c;border:1px solid #26303c;border-radius:12px;padding:14px}.edge b{font-size:20px}.muted{color:#8b949e;font-size:12px}.good{color:#3fb950}.warn{color:#d29922}table{width:100%;border-collapse:collapse;margin-top:10px;background:#11161d;border:1px solid #252d38;border-radius:12px;overflow:hidden}th,td{text-align:left;padding:9px;border-bottom:1px solid #252d38;font-size:13px}a{color:#58a6ff}.tag{display:inline-block;padding:2px 7px;border-radius:999px;background:#1b2330;color:#c9d1d9;font-size:11px;margin-right:4px}</style></head><body><main><div class="top"><div><h1 style="margin:0">GALAXI V34 · INDEPENDENT 12 EDGE TERMINAL</h1><div class="sub">${htmlEscape(state.mode)} · IA ${htmlEscape(state.aiModel)} · ciclo ${state.cycle}</div></div><span class="pill">${state.wsConnected ? 'BINANCE LIVE DATA' : 'BINANCE DESCONECTADO'}</span></div><div class="grid"><div class="card"><div class="k">Equity</div><div class="v">$${Number(state.equity).toFixed(2)}</div></div><div class="card"><div class="k">Net PnL</div><div class="v">$${Number(state.realizedPnl + state.unrealizedPnl).toFixed(2)}</div></div><div class="card"><div class="k">Mercados</div><div class="v">${state.symbols}</div></div><div class="card"><div class="k">Deep / IA</div><div class="v">${state.deepScanned} / ${state.candidates}</div></div><div class="card"><div class="k">IA calls / errores</div><div class="v">${state.aiCalls} / ${state.aiErrors}</div></div><div class="card"><div class="k">Top Trader coverage</div><div class="v">${state.behaviorCoverage}%</div></div><div class="card"><div class="k">Edge tradeable</div><div class="v">${e.tradeableCount || 0}</div></div><div class="card"><div class="k">Posiciones</div><div class="v">${positions.length} · L${state.longOpen}/S${state.shortOpen}</div></div></div><div class="section"><h2>EDGE SCANNER</h2><div class="scanner"><div class="edge"><div class="muted">MEJOR LONG</div><b>${htmlEscape(e.bestLong?.symbol || '—')}</b><div>Score <span class="good">${fmt(e.bestLong?.score)}</span></div><div class="muted">Trader ${htmlEscape(e.bestLong?.behavior || '—')} · funding ${fmt(e.bestLong?.funding)}% · basis ${fmt(e.bestLong?.basis)}%</div></div><div class="edge"><div class="muted">MEJOR SHORT</div><b>${htmlEscape(e.bestShort?.symbol || '—')}</b><div>Score <span class="good">${fmt(e.bestShort?.score)}</span></div><div class="muted">Trader ${htmlEscape(e.bestShort?.behavior || '—')} · funding ${fmt(e.bestShort?.funding)}% · basis ${fmt(e.bestShort?.basis)}%</div></div><div class="edge"><div class="muted">MEJOR OPORTUNIDAD</div><b>${htmlEscape(e.bestOverall?.symbol || '—')} ${htmlEscape(e.bestOverall?.side || '')}</b><div>Score <span class="good">${fmt(e.bestOverall?.score)}</span></div><div class="muted">Observados ${e.watchedCount || 0} · promedio ${fmt(e.avgEdge)}</div></div></div></div><div class="section"><h2>EDGE LEADERBOARD</h2><table><thead><tr><th>Símbolo</th><th>Sesgo</th><th>Edge</th><th>Long</th><th>Short</th><th>Top Trader</th><th>Funding</th><th>OI 5m</th></tr></thead><tbody>${topRows || '<tr><td colspan=8>Esperando scanner</td></tr>'}</tbody></table></div><div class="section"><h2>Posiciones</h2><table><thead><tr><th>Símbolo</th><th>Lado</th><th>Entrada</th><th>Mark</th><th>PnL</th></tr></thead><tbody>${rows || '<tr><td colspan=5>Sin posiciones abiertas</td></tr>'}</tbody></table></div><div class="section muted">Régimen: <span class="tag">${htmlEscape(state.regime)}</span> Comportamiento: <span class="tag">${htmlEscape(state.behaviorBias)}</span> · Confianza ${state.behaviorConfidence}% · <a href="/health">health</a> · <a href="/state">state</a></div></main></body></html>`;
 }
 
 const webServer = http.createServer((req, res) => {
@@ -1011,17 +1011,9 @@ function riskAllowsOpen(symbol, margin, side) {
   if (stopped) return { ok: false, reason: 'STOP' };
   if (state.positions.length >= cfg.maxPositions) return { ok: false, reason: 'MAX_POSITIONS' };
 
-  const longs = state.positions.filter(p => p.side === 'LONG').length;
-  const shorts = state.positions.filter(p => p.side === 'SHORT').length;
-
-  // 50/50 target expressed as hard per-side capacity, without forcing a trade
-  // when there is no positive expected edge.
-  if (side === 'LONG' && longs >= cfg.maxLongPositions) {
-    return { ok: false, reason: 'LONG_QUOTA_FULL' };
-  }
-  if (side === 'SHORT' && shorts >= cfg.maxShortPositions) {
-    return { ok: false, reason: 'SHORT_QUOTA_FULL' };
-  }
+  // Direction is independent per symbol. There is NO global LONG/SHORT quota and
+  // NO 50/50 requirement. The only portfolio slot limit is maxPositions=12;
+  // LONG and SHORT compete independently across the 528-symbol universe.
 
   const totalMargin = state.positions.reduce((s, p) => s + Number(p.margin || 0), 0);
   const maxTotal = state.equity * cfg.maxTotalMarginPct / 100;
@@ -1159,9 +1151,8 @@ async function askAI(market, account) {
       openPositions: positions.length,
       longs,
       shorts,
-      longCapacity: cfg.maxLongPositions - longs,
-      shortCapacity: cfg.maxShortPositions - shorts,
-      target: '50% LONG / 50% SHORT when valid opportunities exist'
+      slotsRemaining: Math.max(0, cfg.maxPositions - positions.length),
+      directionPolicy: 'INDEPENDIENTE: LONG y SHORT compiten por las 12 plazas sin cuota ni objetivo 50/50'
     },
 
     marketCoverage: {
@@ -1169,8 +1160,8 @@ async function askAI(market, account) {
       deepScannedThisCycle: state.deepScanned,
       aiAnalyzed: compactMarket.length,
       behaviorCoveragePct: state.behaviorCoverage,
-      behaviorBias: state.behaviorBias,
-      behaviorConfidence: state.behaviorConfidence
+      behaviorBiasDiagnosticOnly: state.behaviorBias,
+      behaviorConfidenceDiagnosticOnly: state.behaviorConfidence
     },
 
     learning: learningSummary(),
@@ -1210,18 +1201,22 @@ TOP TRADERS:
 Los datos son agregados del 20% superior por saldo de margen; NO son identidades
 individuales. Úsalos como señal de comportamiento colectivo y no como copia ciega.
 
-BALANCE:
-- Máximo ${cfg.maxLongPositions} LONG y ${cfg.maxShortPositions} SHORT.
-- Objetivo estructural: 50% LONG / 50% SHORT cuando existan oportunidades válidas.
-- Si una dirección está llena, no abras más de esa dirección.
-- No inventes una operación sólo para completar 50/50.
-- Si LONG y SHORT compiten, compara expectativa neta, confirmación, liquidez,
-  comportamiento Top Trader y memoria histórica.
+PORTFOLIO / DIRECCIÓN:
+- El universo operativo es el mercado completo de Binance (todos los símbolos cargados; actualmente ~528).
+- GALAXI dispone de hasta ${cfg.maxPositions} posiciones simultáneas.
+- NO existe objetivo 50/50 y NO existe cuota LONG/SHORT.
+- Cada símbolo se evalúa de forma independiente en LONG y SHORT.
+- El régimen global (ALCISTA/BAJISTA/MIXTO) es contexto, NUNCA una instrucción de dirección.
+- El sesgo agregado de Top Traders es una señal por símbolo, NUNCA una orden global de comprar o vender.
+- Si hay 8 LONG válidos y 4 SHORT válidos, puede mantener 8L/4S; si hay 2L/10S, puede mantener 2L/10S.
+- No fuerces equilibrio ni abras una operación sólo para llenar 12 posiciones.
+- Selecciona hasta 12 operaciones con expectativa neta positiva, independientemente del lado.
 
 ENTRADA:
-- Sólo OPEN_LONG/OPEN_SHORT cuando la tesis esté confirmada.
-- Compara siempre la mejor oportunidad LONG contra la mejor SHORT antes de decidir.
-- Prefiere símbolos con edgeScore alto y señales independientes que coincidan.
+- Sólo OPEN_LONG/OPEN_SHORT cuando la tesis individual del símbolo esté confirmada.
+- Evalúa LONG y SHORT por separado para CADA símbolo.
+- No compares las direcciones a nivel global para descartar una de ellas: un LONG de un símbolo puede coexistir con un SHORT de otro.
+- Prefiere oportunidades con edge, expectativa neta, liquidez, comportamiento, OI y estructura que coincidan.
 - expected_net_pct debe superar ${cfg.minExpectedNetPct}% después de comisiones.
 - Evita entradas tardías cuando el movimiento ya está demasiado extendido.
 - No repitas una moneda sólo porque funcionó antes.
@@ -1459,7 +1454,7 @@ function paperOpen(a, marketRow) {
 
     confidence: Number(a.confidence || 0),
     expectedNetPct: Number(a.expected_net_pct || 0),
-    strategy: 'V33_EDGE_BEHAVIORAL',
+    strategy: 'V34_INDEPENDENT_12_EDGE',
     thesis: a.reason,
 
     features: {
@@ -1946,7 +1941,7 @@ async function boot() {
     ` | scan=${cfg.scanMs}ms` +
     ` | deep=${cfg.deepScanSymbols}` +
     ` | ai=${cfg.aiTopSymbols}` +
-    ` | balance=6L/6S`
+    ` | slots=12 independiente`
   );
 
   loadControl();

@@ -1,6 +1,6 @@
 {
   "name": "galaxi-v33-edge-terminal",
-  "version": "33.0.0",
+  "version": "34.0.0",
   "private": true,
   "type": "module",
   "scripts": {
