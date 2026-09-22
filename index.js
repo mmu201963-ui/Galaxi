@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import WebSocket from 'ws';
 
 /*
-GALAXI V28 POSITIONS DIRECT
+GALAXI V31 CLOSE GUARANTEED
 - Real-time Binance USD-M Futures market data
 - AI decision engine through OpenAI Responses API
 - PAPER by default
@@ -47,10 +47,12 @@ const cfg = {
   minSecondsBetweenOrders: Math.max(2, Number(process.env.MIN_SECONDS_BETWEEN_ORDERS || 5)),
   maxActionsPerCycle: Math.min(4, Math.max(1, Number(process.env.MAX_ACTIONS_PER_CYCLE || 4))),
   minExpectedNetPct: Math.max(0.005, Number(process.env.MIN_EXPECTED_NET_PCT || 0.01)),
+  sideBalancePct: 50,
 
   paperTpPct: Number(process.env.PAPER_TP_PCT || 1.2),
   paperSlPct: Number(process.env.PAPER_SL_PCT || 0.7),
-  paperMaxHoldMs: Number(process.env.PAPER_MAX_HOLD_MS || 1800000),
+  paperMaxHoldMs: Number(process.env.PAPER_MAX_HOLD_MS || 1200000),
+  paperMinHoldMs: Number(process.env.PAPER_MIN_HOLD_MS || 15000),
 };
 
 const state = {
@@ -581,6 +583,13 @@ async function askAI(market, account) {
     shortPct: state.shortPct,
     equity: state.equity,
     positions,
+    directionBalance: {
+      targetLongPct: cfg.sideBalancePct,
+      targetShortPct: cfg.sideBalancePct,
+      openLongs: positions.filter(p => p.side === 'LONG').length,
+      openShorts: positions.filter(p => p.side === 'SHORT').length,
+      maxPositions: cfg.maxPositions
+    },
     market: market.slice(0, cfg.aiTopSymbols),
     universePolicy: {
       normal: 'competencia abierta',
@@ -596,6 +605,12 @@ Tu trabajo es analizar el snapshot y decidir qué hacer AHORA. No uses una regla
 Combina estructura de mercado, momentum multitemporal, RSI, EMA, ATR, volumen, rupturas,
 régimen y contexto de las posiciones existentes. Busca oportunidades LONG y SHORT y evita
 abrir repetidamente el mismo símbolo sin una nueva tesis.
+
+BALANCE DE DIRECCIÓN 50/50:
+- Objetivo de cartera: 50% LONG y 50% SHORT sobre las posiciones abiertas.
+- Si hay más LONG que SHORT, prioriza SHORT cuando exista una señal válida.
+- Si hay más SHORT que LONG, prioriza LONG cuando exista una señal válida.
+- No inventes operaciones para completar el 50/50: debe existir una oportunidad válida.
 
 UNIVERSO DE OPORTUNIDADES:
 - No te limites a BTC/ETH ni a las monedas que hayan operado ciclos anteriores.
@@ -949,10 +964,14 @@ function markPaperPositions() {
     p.unrealizedPct = p.margin ? p.pnl / p.margin * 100 : 0;
 
     const age = tNow - p.openedTs;
-    const tp = p.unrealizedPct >= cfg.paperTpPct;
-    const sl = p.unrealizedPct <= -cfg.paperSlPct;
-    const timeout = age >= cfg.paperMaxHoldMs;
+    const mature = age >= cfg.paperMinHoldMs;
+    const tp = mature && p.unrealizedPct >= cfg.paperTpPct;
+    const sl = mature && p.unrealizedPct <= -cfg.paperSlPct;
+    const timeout = mature && age >= cfg.paperMaxHoldMs;
 
+    // HARD CLOSE PATH: every PAPER position has deterministic exit rules.
+    // The AI may also issue CLOSE, but it can never leave a position open
+    // indefinitely because of repeated HOLD decisions.
     if (tp || sl || timeout) {
       state.realizedPnl += p.pnl;
       pushHistory({
@@ -960,7 +979,7 @@ function markPaperPositions() {
         symbol: p.symbol,
         side: p.side,
         pnl: round(p.pnl, 4),
-        reason: tp ? 'TP' : sl ? 'SL' : 'TIME'
+        reason: tp ? 'TP' : sl ? 'SL' : 'TIMEOUT'
       });
       cooldown.set(p.symbol, tNow + 60000);
     } else {
@@ -1016,8 +1035,37 @@ async function executeDecision(decision, market) {
     return true;
   });
   // Position management has priority: CLOSE decisions execute before new entries.
-  const actions = filteredActions
-    .sort((a, b) => (a.action === 'CLOSE' ? -1 : 0) - (b.action === 'CLOSE' ? -1 : 0))
+  // Directional balance: target 50% LONG / 50% SHORT. With 12 max positions,
+  // no more than 6 open positions are allowed on either side. When imbalanced,
+  // valid entries from the underrepresented side are preferred.
+  const longOpen = state.positions.filter(p => p.side === 'LONG').length;
+  const shortOpen = state.positions.filter(p => p.side === 'SHORT').length;
+  const maxPerSide = Math.max(1, Math.floor(cfg.maxPositions * cfg.sideBalancePct / 100));
+
+  const closeActions = filteredActions
+    .filter(a => a.action === 'CLOSE' && state.positions.some(p => p.symbol === a.symbol))
+    .sort((a, b) => {
+      const pa = state.positions.find(p => p.symbol === a.symbol);
+      const pb = state.positions.find(p => p.symbol === b.symbol);
+      return Number(pb?.pnl || 0) - Number(pa?.pnl || 0);
+    });
+  const openActions = filteredActions.filter(a => a.action === 'OPEN_LONG' || a.action === 'OPEN_SHORT');
+  const holdActions = filteredActions.filter(a => a.action === 'HOLD');
+
+  const balancedOpens = openActions
+    .filter(a => {
+      if (a.action === 'OPEN_LONG' && longOpen >= maxPerSide) return false;
+      if (a.action === 'OPEN_SHORT' && shortOpen >= maxPerSide) return false;
+      return true;
+    })
+    .sort((a, b) => {
+      const aPreferred = longOpen < shortOpen ? (a.action === 'OPEN_LONG') : shortOpen < longOpen ? (a.action === 'OPEN_SHORT') : false;
+      const bPreferred = longOpen < shortOpen ? (b.action === 'OPEN_LONG') : shortOpen < longOpen ? (b.action === 'OPEN_SHORT') : false;
+      if (aPreferred !== bPreferred) return aPreferred ? -1 : 1;
+      return Number(b.expected_net_pct || 0) - Number(a.expected_net_pct || 0);
+    });
+
+  const actions = [...closeActions, ...balancedOpens, ...holdActions]
     .slice(0, cfg.maxActionsPerCycle);
   state.riskApproved = actions.filter(x => x.action !== 'HOLD').length;
 
@@ -1228,7 +1276,7 @@ async function runCycle() {
 }
 
 async function boot() {
-  console.log(`GALAXI V29 | mode=${cfg.mode} | model=${cfg.openaiModel} | scan=${cfg.scanMs}ms | SIMPLE_POSITIONS=ON`);
+  console.log(`GALAXI V31 | mode=${cfg.mode} | model=${cfg.openaiModel} | scan=${cfg.scanMs}ms | SIMPLE_POSITIONS=ON`);
 
   console.log(`OPENAI_KEY_PRESENT=${cfg.openaiKey ? 1 : 0}`);
   console.log(`OPENAI_MODEL=${cfg.openaiModel}`);

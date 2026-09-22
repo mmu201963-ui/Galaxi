@@ -1,7 +1,13 @@
-GALAXI V29 POSITIONS DIRECT FIX
+GALAXI V31 CLOSE GUARANTEED
 
-Corrige el problema observado en V28: la IA generaba OPEN_LONG/OPEN_SHORT correctamente, pero la capa PAPER no podía completar la entrada porque faltaban las funciones de control de margen/riesgo usadas por paperOpen().
+Basada en la versión que ya estaba abriendo posiciones.
+- Objetivo de balance: 50% LONG / 50% SHORT.
+- Universo diversificado: mercados normales, memecoins y listados recientes.
+- PAPER por defecto.
+- La IA puede OPEN_LONG, OPEN_SHORT, CLOSE y HOLD.
+- Cierres reforzados: TP, SL y tiempo máximo de permanencia.
+- El tiempo máximo PAPER por defecto es 20 minutos y existe un mínimo de 15 segundos para evitar cierres instantáneos por ruido.
+- Las órdenes CLOSE de la IA tienen prioridad sobre nuevas entradas.
+- Ninguna posición PAPER puede quedar abierta indefinidamente aunque la IA repita HOLD.
 
-V29 restaura riskAllowsOpen() y marginFor(), y muestra el motivo si una entrada PAPER es omitida.
-Mantiene PAPER, Binance USD-M, IA, multiuniverso, LONG/SHORT, memecoins/nuevas monedas y gestión de posiciones.
-No activar LIVE para esta prueba.
+IMPORTANTE: mantener PAPER para validar el comportamiento antes de cualquier operación real.
