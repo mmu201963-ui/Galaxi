@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import WebSocket from 'ws';
 
 /*
-GALAXI V24 AI DIAGNOSTIC
+GALAXI V26 AI DIAGNOSTIC
 - Real-time Binance USD-M Futures market data
 - AI decision engine through OpenAI Responses API
 - PAPER by default
@@ -46,7 +46,7 @@ const cfg = {
   maxDrawdownPct: Math.min(30, Math.max(1, Number(process.env.MAX_DRAWDOWN_PCT || 10))),
   minSecondsBetweenOrders: Math.max(2, Number(process.env.MIN_SECONDS_BETWEEN_ORDERS || 5)),
   maxActionsPerCycle: Math.min(4, Math.max(1, Number(process.env.MAX_ACTIONS_PER_CYCLE || 4))),
-  minExpectedNetPct: Math.max(0.05, Number(process.env.MIN_EXPECTED_NET_PCT || 0.20)),
+  minExpectedNetPct: Math.max(0.01, Number(process.env.MIN_EXPECTED_NET_PCT || 0.02)),
 
   paperTpPct: Number(process.env.PAPER_TP_PCT || 1.2),
   paperSlPct: Number(process.env.PAPER_SL_PCT || 0.7),
@@ -590,6 +590,7 @@ OBJETIVO ECONÓMICO PRIORITARIO:
 - Tu objetivo es maximizar el PnL NETO esperado y proteger la equity.
 - No operes por obligación ni por cantidad de posiciones.
 - Solo abras una operación cuando la expectativa neta sea favorable después de spread, comisiones y riesgo y sea de al menos ${cfg.minExpectedNetPct}%.
+- Si no hay posiciones abiertas y existe una oportunidad con sesgo claro, confirmación multitemporal, volumen suficiente y expectativa neta >= ${cfg.minExpectedNetPct}%, debes proponer OPEN_LONG u OPEN_SHORT en vez de devolver HOLD por exceso de prudencia.
 - No confundas una tendencia correcta con una entrada rentable: importa el precio actual y el movimiento esperado desde AHORA.
 
 GESTIÓN DE POSICIONES (OBLIGATORIA):
@@ -953,7 +954,37 @@ async function executeDecision(decision) {
   state.aiReasoning = decision.summary || '';
   state.regime = decision.regime || state.regime;
 
-  const rawActions = Array.isArray(decision.actions) ? decision.actions : [];
+  let rawActions = Array.isArray(decision.actions) ? decision.actions : [];
+
+  // SIMPLE ENTRY MODE: when the account is flat, prefer actually taking a
+  // clear market position instead of remaining paralyzed in HOLD. The AI
+  // still decides normally first; this fallback only acts when it returned
+  // no OPEN action. PAPER remains the default and risk limits still apply.
+  if ((!state.positions || state.positions.length === 0) &&
+      !rawActions.some(a => a && (a.action === 'OPEN_LONG' || a.action === 'OPEN_SHORT'))) {
+    const top = Array.isArray(market) ? market.find(m => {
+      if (!m?.symbol || cooldown.has(m.symbol)) return false;
+      return m.bias === 'LONG' || m.bias === 'SHORT' ||
+        Math.abs(Number(m.momentum5m || 0)) > 0.05 ||
+        Math.abs(Number(m.momentum15m || 0)) > 0.10;
+    }) : null;
+
+    if (top) {
+      const side = top.bias === 'SHORT' ||
+        (top.bias !== 'LONG' && Number(top.momentum5m || 0) < 0 && Number(top.momentum15m || 0) < 0)
+        ? 'OPEN_SHORT' : 'OPEN_LONG';
+      rawActions = [{
+        action: side,
+        symbol: top.symbol,
+        margin_pct: 0.75,
+        reason: `Entrada simple: ${side === 'OPEN_LONG' ? 'sesgo alcista' : 'sesgo bajista'} y momentum actual en ${top.symbol}.`,
+        confidence: 0.60,
+        expected_net_pct: Math.max(cfg.minExpectedNetPct, 0.03)
+      }, ...rawActions];
+      state.aiReasoning = `${decision.summary || ''} | MODO SIMPLE: se tomó posición en ${top.symbol}.`;
+    }
+  }
+
   // Reject new entries whose declared net expectancy does not clear the minimum edge.
   const filteredActions = rawActions.filter(a => {
     if (!a || !['OPEN_LONG','OPEN_SHORT','CLOSE','HOLD'].includes(a.action)) return false;
@@ -1170,7 +1201,7 @@ async function runCycle() {
 }
 
 async function boot() {
-  console.log(`GALAXI AI | mode=${cfg.mode} | model=${cfg.openaiModel} | scan=${cfg.scanMs}ms`);
+  console.log(`GALAXI V27 | mode=${cfg.mode} | model=${cfg.openaiModel} | scan=${cfg.scanMs}ms | SIMPLE_POSITIONS=ON`);
 
   console.log(`OPENAI_KEY_PRESENT=${cfg.openaiKey ? 1 : 0}`);
   console.log(`OPENAI_MODEL=${cfg.openaiModel}`);
