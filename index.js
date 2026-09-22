@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import http from 'node:http';
 import WebSocket from 'ws';
 
 /*
@@ -79,6 +80,46 @@ const cfg = {
   learningMaxTrades: Math.min(2000, Math.max(100, Number(process.env.LEARNING_MAX_TRADES || 500))),
   learningMinSamples: Math.min(50, Math.max(5, Number(process.env.LEARNING_MIN_SAMPLES || 8)))
 };
+
+
+const webPort = Number(process.env.PORT || 3000);
+const webHost = '0.0.0.0';
+
+function htmlEscape(value) {
+  return String(value ?? '').replace(/[&<>\"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[ch]));
+}
+
+function dashboardHtml() {
+  const positions = Array.isArray(state.positions) ? state.positions : [];
+  const rows = positions.map(p => `<tr><td>${htmlEscape(p.symbol)}</td><td>${htmlEscape(p.side)}</td><td>${Number(p.entry || 0).toFixed(6)}</td><td>${Number(p.mark || 0).toFixed(6)}</td><td>${Number(p.pnl || 0).toFixed(2)}</td></tr>`).join('');
+  return `<!doctype html><html lang=\"es\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>GALAXI V32</title><meta http-equiv=\"refresh\" content=\"10\"><style>body{font-family:system-ui;background:#0d1117;color:#eee;margin:0;padding:24px}main{max-width:1000px;margin:auto}h1{margin:0 0 6px}.sub{color:#9ca3af;margin-bottom:20px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}.card{background:#161b22;border:1px solid #30363d;border-radius:14px;padding:16px}.k{color:#8b949e;font-size:13px}.v{font-size:22px;font-weight:700;margin-top:5px}table{width:100%;border-collapse:collapse;margin-top:16px;background:#161b22;border-radius:14px;overflow:hidden}th,td{text-align:left;padding:10px;border-bottom:1px solid #30363d}a{color:#58a6ff}</style></head><body><main><h1>GALAXI V32 · Behavioral Engine</h1><div class=\"sub\">${htmlEscape(state.mode)} · IA ${htmlEscape(state.aiModel)} · actualización ${htmlEscape(state.lastUpdate || 'iniciando')}</div><div class=\"grid\"><div class=\"card\"><div class=\"k\">Estado</div><div class=\"v\">${state.running ? 'ACTIVO' : 'DETENIDO'}</div></div><div class=\"card\"><div class=\"k\">Equity</div><div class=\"v\">$${Number(state.equity).toFixed(2)}</div></div><div class=\"card\"><div class=\"k\">Posiciones</div><div class=\"v\">${positions.length} · L${state.longOpen}/S${state.shortOpen}</div></div><div class=\"card\"><div class=\"k\">Mercados</div><div class=\"v\">${state.symbols}</div></div><div class=\"card\"><div class=\"k\">Deep / IA</div><div class=\"v\">${state.deepScanned} / ${state.candidates}</div></div><div class=\"card\"><div class=\"k\">WS Binance</div><div class=\"v\">${state.wsConnected ? 'CONECTADO' : 'DESCONECTADO'}</div></div><div class=\"card\"><div class=\"k\">Ciclos</div><div class=\"v\">${state.cycle}</div></div><div class=\"card\"><div class=\"k\">IA calls / errores</div><div class=\"v\">${state.aiCalls} / ${state.aiErrors}</div></div></div><h2>Posiciones</h2><table><thead><tr><th>Símbolo</th><th>Lado</th><th>Entrada</th><th>Mark</th><th>PnL</th></tr></thead><tbody>${rows || '<tr><td colspan=5>Sin posiciones abiertas</td></tr>'}</tbody></table><p><a href=\"/health\">/health</a> · <a href=\"/state\">/state</a></p></main></body></html>`;
+}
+
+const webServer = http.createServer((req, res) => {
+  try {
+    if (req.url === '/health') {
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: true, running: state.running, wsConnected: state.wsConnected, mode: state.mode, cycle: state.cycle, lastError: state.lastError }));
+      return;
+    }
+    if (req.url === '/state') {
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(state));
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(dashboardHtml());
+  } catch (e) {
+    res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end(`GALAXI web error: ${e.message}`);
+  }
+});
+
+webServer.listen(webPort, webHost, () => {
+  console.log(`WEB_CONNECTED=1 | host=${webHost} | port=${webPort}`);
+});
 
 const state = {
   running: true,
